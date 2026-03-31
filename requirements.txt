@@ -1,0 +1,10 @@
+Django==5.0.1
+djangorestframework==3.14.0
+djangorestframework-simplejwt==5.3.1
+django-cors-headers==4.3.1
+mysqlclient==2.2.1
+requests==2.32.5
+pycryptodome==3.20.0
+channels==4.3.2
+channels-postgres==1.1.4
+daphne==4.2.1
