@@ -1,7 +1,9 @@
 from pathlib import Path
 from datetime import timedelta
+import dj_database_url
 import os
 from dotenv import load_dotenv
+from decouple import config
 
 load_dotenv()
 
@@ -104,6 +106,8 @@ DATABASES = {
 }
 
 AUTH_USER_MODEL = 'user.User'
+
+DATABASES ["default"]= dj_database_url.parse("")
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
