@@ -107,7 +107,7 @@ DATABASES = {
 
 AUTH_USER_MODEL = 'user.User'
 
-DATABASES ["default"]= dj_database_url.parse("")
+DATABASES ["default"]= dj_database_url.parse(config("DATABASE_URL"))
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
