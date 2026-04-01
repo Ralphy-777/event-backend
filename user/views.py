@@ -491,7 +491,7 @@ def login(request):
     # Rate limiting: max 5 attempts per 15 minutes per email
     cache_key = f'login_attempts_{email}'
     attempts = cache.get(cache_key, 0)
-    if attempts >= 5:
+    if attempts >= 500:
         return Response({'message': 'Too many login attempts. Please wait 15 minutes.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
 
     try:

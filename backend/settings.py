@@ -1,8 +1,10 @@
-from pathlib import Path
-from datetime import timedelta
 import os
+from datetime import timedelta
+from pathlib import Path
+
 import dj_database_url
 from dotenv import load_dotenv
+from django import VERSION as DJANGO_VERSION
 
 load_dotenv()
 
@@ -47,8 +49,9 @@ ALLOWED_HOSTS = [h for h in ALLOWED_HOSTS if h]  # remove empty strings
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
+ENABLE_JAZZMIN = env_bool('ENABLE_JAZZMIN', default=DJANGO_VERSION < (6, 0))
+
 INSTALLED_APPS = [
-    'jazzmin',
     'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
@@ -62,6 +65,9 @@ INSTALLED_APPS = [
     'corsheaders',
     'channels',
 ]
+
+if ENABLE_JAZZMIN:
+    INSTALLED_APPS.insert(0, 'jazzmin')
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
