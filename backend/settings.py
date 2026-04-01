@@ -159,6 +159,14 @@ PAYMONGO_PUBLIC_KEY = os.environ.get('PAYMONGO_PUBLIC_KEY', '')
 # Frontend URL
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 
+# Cache — use database cache on Render (no Redis needed)
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'django_cache_table',
+    }
+}
+
 # Email
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'

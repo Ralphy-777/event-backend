@@ -5,7 +5,6 @@ from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import Booking, Payment, EventType, Video, Review, ReviewReply, Notification, ContactMessage
-from .paymongo import create_gcash_payment, get_payment_link_status
 from datetime import datetime, date as date_type, timedelta
 from django.core.mail import send_mail
 from django.conf import settings
@@ -263,19 +262,22 @@ def register(request):
             'code': code,
         }, timeout=900)  # 15 minutes
 
-        send_mail(
-            subject='Your EventPro Verification Code',
-            message=(
-                f'Hi {data.get("first_name")},\n\n'
-                f'Your verification code is: {code}\n\n'
-                f'Enter this code in the app to activate your account.\n'
-                f'This code is valid for 15 minutes.\n\n'
-                f'— EventPro Team'
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=True,
-        )
+        try:
+            send_mail(
+                subject='Your EventPro Verification Code',
+                message=(
+                    f'Hi {data.get("first_name")},\n\n'
+                    f'Your verification code is: {code}\n\n'
+                    f'Enter this code in the app to activate your account.\n'
+                    f'This code is valid for 15 minutes.\n\n'
+                    f'\u2014 EventPro Team'
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                fail_silently=True,
+            )
+        except Exception as mail_err:
+            logger.warning('Registration email failed: %s', mail_err)
 
         return Response({
             'message': 'Registration successful. Check your email for the verification code.',
@@ -283,6 +285,7 @@ def register(request):
             'email': email,
         }, status=status.HTTP_201_CREATED)
     except Exception as e:
+        logger.exception('register error: %s', e)
         return Response({'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
