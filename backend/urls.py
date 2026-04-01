@@ -3,6 +3,7 @@ from django.urls import path, include
 from django.http import JsonResponse, HttpResponse
 from django.conf import settings
 from django.conf.urls.static import static
+from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 from rest_framework_simplejwt.views import TokenRefreshView
 
 # Safe import of organizer_site — if admin.py has an error this won't crash the whole server
@@ -30,3 +31,5 @@ urlpatterns = [
     path('api/user/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     *_organizer_urls,
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+urlpatterns += staticfiles_urlpatterns()
