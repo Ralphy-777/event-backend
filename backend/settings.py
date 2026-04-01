@@ -172,7 +172,7 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
@@ -226,38 +226,101 @@ DEFAULT_FROM_EMAIL = f'EventPro <{os.environ.get("EMAIL_HOST_USER", "")}>'
 
 # Jazzmin Admin UI
 JAZZMIN_SETTINGS = {
+    # ── Branding ──────────────────────────────────────────────────────────────
     'site_title': 'EventPro Admin',
     'site_header': 'EventPro',
     'site_brand': 'EventPro',
     'site_logo': None,
-    'welcome_sign': 'Welcome to EventPro Admin',
-    'copyright': 'EventPro',
+    'site_logo_classes': None,
+    'site_icon': None,
+    'welcome_sign': 'Welcome to EventPro Admin Panel',
+    'copyright': 'EventPro © 2025',
+
+    # ── Search ────────────────────────────────────────────────────────────────
     'search_model': ['user.User', 'user.Booking'],
+
+    # ── User avatar ───────────────────────────────────────────────────────────
+    'user_avatar': None,
+
+    # ── Top menu ──────────────────────────────────────────────────────────────
     'topmenu_links': [
-        {'name': 'Home', 'url': 'admin:index', 'permissions': ['auth.view_user']},
-        {'name': 'View Site', 'url': '/', 'new_window': True},
+        {'name': 'Dashboard', 'url': 'admin:index', 'permissions': ['auth.view_user']},
+        {'name': 'View Site', 'url': 'https://event-bookings-git-main-ralphy-777s-projects.vercel.app', 'new_window': True},
+        {'model': 'user.User'},
+        {'model': 'user.Booking'},
     ],
+
+    # ── User menu ─────────────────────────────────────────────────────────────
+    'usermenu_links': [
+        {'name': 'View Site', 'url': 'https://event-bookings-git-main-ralphy-777s-projects.vercel.app', 'new_window': True, 'icon': 'fas fa-external-link-alt'},
+    ],
+
+    # ── Sidebar ───────────────────────────────────────────────────────────────
     'show_sidebar': True,
     'navigation_expanded': True,
+    'hide_apps': [],
+    'hide_models': [],
+    'order_with_respect_to': [
+        'user',
+        'user.User',
+        'user.Booking',
+        'user.Payment',
+        'user.EventType',
+        'user.Review',
+        'user.ReviewReply',
+        'user.Notification',
+        'user.ContactMessage',
+        'user.Video',
+    ],
+
+    # ── Custom links in sidebar ───────────────────────────────────────────────
+    'custom_links': {
+        'user': [{
+            'name': 'View Frontend',
+            'url': 'https://event-bookings-git-main-ralphy-777s-projects.vercel.app',
+            'icon': 'fas fa-globe',
+            'new_window': True,
+        }],
+    },
+
+    # ── Icons ─────────────────────────────────────────────────────────────────
     'icons': {
         'auth': 'fas fa-users-cog',
-        'user.user': 'fas fa-user',
+        'auth.group': 'fas fa-users',
+        'user.user': 'fas fa-user-circle',
         'user.booking': 'fas fa-calendar-check',
         'user.payment': 'fas fa-credit-card',
-        'user.eventtype': 'fas fa-star',
-        'user.review': 'fas fa-star-half-alt',
+        'user.eventtype': 'fas fa-tags',
+        'user.review': 'fas fa-star',
+        'user.reviewreply': 'fas fa-reply',
         'user.notification': 'fas fa-bell',
-        'user.contactmessage': 'fas fa-envelope',
+        'user.contactmessage': 'fas fa-envelope-open-text',
         'user.video': 'fas fa-video',
     },
-    'default_icon_parents': 'fas fa-chevron-circle-right',
+    'default_icon_parents': 'fas fa-folder',
     'default_icon_children': 'fas fa-circle',
+
+    # ── Related modals ────────────────────────────────────────────────────────
     'related_modal_active': True,
+
+    # ── Custom CSS/JS — set to None to avoid 404s breaking the UI ────────────
     'custom_css': None,
     'custom_js': None,
+
+    # ── Fonts ─────────────────────────────────────────────────────────────────
     'use_google_fonts_cdn': True,
+
+    # ── UI Builder (disable in production) ───────────────────────────────────
     'show_ui_builder': False,
+
+    # ── Change form layout ────────────────────────────────────────────────────
     'changeform_format': 'horizontal_tabs',
+    'changeform_format_overrides': {
+        'user.user': 'collapsible',
+        'user.booking': 'vertical_tabs',
+    },
+
+    # ── Language chooser ──────────────────────────────────────────────────────
     'language_chooser': False,
 }
 
@@ -277,7 +340,7 @@ JAZZMIN_UI_TWEAKS = {
     'sidebar': 'sidebar-dark-primary',
     'sidebar_nav_small_text': False,
     'sidebar_disable_expand': False,
-    'sidebar_nav_child_indent': False,
+    'sidebar_nav_child_indent': True,
     'sidebar_nav_compact_style': False,
     'sidebar_nav_legacy_style': False,
     'sidebar_nav_flat_style': False,
@@ -291,4 +354,5 @@ JAZZMIN_UI_TWEAKS = {
         'danger': 'btn-danger',
         'success': 'btn-success',
     },
+    'actions_sticky_top': True,
 }
