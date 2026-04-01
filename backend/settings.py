@@ -77,13 +77,18 @@ MIDDLEWARE = [
 
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
-CSRF_TRUSTED_ORIGINS = [
+
+_extra_csrf = env_list('CSRF_TRUSTED_ORIGINS')
+CSRF_TRUSTED_ORIGINS = list({
     'http://localhost:3000',
+    'http://127.0.0.1:3000',
     'https://event-bookings-eosin.vercel.app',
     'https://event-booking-chi.vercel.app',
+    'https://event-bookings-git-main-ralphy-777s-projects.vercel.app',
     'https://event-backend-5-v9tx.onrender.com',
     'https://*.vercel.app',
-]
+    *_extra_csrf,
+})
 
 ROOT_URLCONF = 'backend.urls'
 
@@ -189,17 +194,26 @@ GCASH_RECEIVER_NAME = os.environ.get('GCASH_RECEIVER_NAME', 'Liberato Villarojo'
 # PayMongo
 PAYMONGO_SECRET_KEY = os.environ.get('PAYMONGO_SECRET_KEY', '')
 PAYMONGO_PUBLIC_KEY = os.environ.get('PAYMONGO_PUBLIC_KEY', '')
+PAYMONGO_BASE_URL = 'https://api.paymongo.com/v1'
 
 # Frontend URL
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://event-bookings-eosin.vercel.app')
 
-# Cache — use database cache on Render (no Redis needed)
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
-        'LOCATION': 'django_cache_table',
+# Cache — Redis on Render if available, otherwise local memory
+_REDIS_URL = os.environ.get('REDIS_URL', '')
+if _REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _REDIS_URL,
+        }
     }
-}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        }
+    }
 
 # Email
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'

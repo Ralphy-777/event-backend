@@ -246,12 +246,10 @@ def register(request):
         if User.objects.filter(email=email).exists():
             return Response({'message': 'Email already exists'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if cache.get(f'pending_reg_{email}'):
-            return Response({'message': 'A verification code was already sent to this email. Please check your inbox or wait before trying again.'}, status=status.HTTP_400_BAD_REQUEST)
-
         code = ''.join(random.choices(string.digits, k=6))
 
-        # Store registration data in cache (not DB) for 15 minutes
+        # Always overwrite any existing pending entry so re-submits always work
+        cache.delete(f'pending_reg_{email}')
         cache.set(f'pending_reg_{email}', {
             'email': email,
             'password': data.get('password'),
@@ -1231,46 +1229,7 @@ def paymongo_webhook(request):
 @api_view(['POST'])
 @csrf_exempt
 def gcash_payment_notify(request):
-    """Handle GCash payment notification callback"""
-    try:
-        # Get notification data
-        data = request.POST.dict()
-        
-        # Verify signature
-        gcash = GCashPayment()
-        if not gcash.verify_payment(data.copy()):
-            return Response({'message': 'Invalid signature'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Extract payment info
-        order_no = data.get('out_trade_no')
-        trade_status = data.get('trade_status')
-        
-        # Find booking by order number
-        # Extract booking_id from order_no (format: ORD{booking_id}{timestamp})
-        booking_id = int(order_no[3:order_no.index(order_no[3:].split(order_no[3])[0])])
-        
-        booking = Booking.objects.get(id=booking_id)
-        
-        if trade_status == 'TRADE_SUCCESS':
-            # Update booking payment status
-            booking.payment_status = 'paid'
-            booking.save()
-            
-            # Create payment record
-            Payment.objects.create(
-                booking=booking,
-                event_id=booking.id,
-                event_name=booking.event_type,
-                client_name=f"{booking.user.first_name} {booking.user.last_name}",
-                payment_method='GCash',
-                reference_number=order_no,
-                amount=booking.total_amount
-            )
-        
-        return Response({'success': True})
-        
-    except Exception as e:
-        return Response({'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return Response({'received': True})
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
