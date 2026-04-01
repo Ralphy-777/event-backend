@@ -15,6 +15,13 @@ def env_list(name: str, default: str = '') -> list[str]:
         return [str(item).strip() for item in value if str(item).strip()]
     return [item.strip() for item in str(value).split(',') if item.strip()]
 
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
 SECRET_KEY = os.environ.get('SECRET_KEY', 'fallback-insecure-key-change-in-production')
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
@@ -52,11 +59,12 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOWED_ORIGINS = env_list(
+_raw_cors_allowed_origins = os.environ.get(
     'CORS_ALLOWED_ORIGINS',
     'http://localhost:3000,http://127.0.0.1:3000,https://event-bookings-mocmuxl39-ralphy-777s-projects.vercel.app,https://event-booking-17w311dcj-ralphy-777s-projects.vercel.app'
 )
-CORS_ALLOW_ALL_ORIGINS = DEBUG  # allow all in dev, restrict in prod
+CORS_ALLOW_ALL_ORIGINS = DEBUG or env_bool('CORS_ALLOW_ALL_ORIGINS', False) or str(_raw_cors_allowed_origins).strip().lower() == 'true'
+CORS_ALLOWED_ORIGINS = [] if CORS_ALLOW_ALL_ORIGINS else env_list('CORS_ALLOWED_ORIGINS', _raw_cors_allowed_origins)
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = env_list(
     'CSRF_TRUSTED_ORIGINS',
