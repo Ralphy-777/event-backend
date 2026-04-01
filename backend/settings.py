@@ -177,7 +177,7 @@ TIME_ZONE = 'UTC'
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 # Use simple static storage — avoids ValueError when staticfiles.json is missing on Render
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
