@@ -6,6 +6,14 @@ from .models import (
     Video, Review, ReviewReply, Notification, ContactMessage,
 )
 
+# organizer_site kept for backward compat with urls.py import
+from django.contrib.admin import AdminSite
+class OrganizerAdminSite(AdminSite):
+    site_header = 'EventPro Organizer'
+    site_title = 'Organizer Portal'
+    index_title = 'Manage Bookings'
+organizer_site = OrganizerAdminSite(name='organizer_admin')
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

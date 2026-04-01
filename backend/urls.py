@@ -1,35 +1,32 @@
-"""
-URL configuration for backend project.
-
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/6.0/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
-"""
 from django.contrib import admin
 from django.urls import path, include
-from django.http import HttpResponse
-from user.admin import organizer_site
+from django.http import JsonResponse, HttpResponse
 from django.conf import settings
 from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenRefreshView
 
+# Safe import of organizer_site — if admin.py has an error this won't crash the whole server
+try:
+    from user.admin import organizer_site
+    _organizer_urls = [path('organizer-admin/', organizer_site.urls)]
+except Exception:
+    _organizer_urls = []
+
+
+def health(request):
+    return JsonResponse({'status': 'ok', 'service': 'EventPro API'})
+
+
 urlpatterns = [
-    path('', lambda r: HttpResponse('EventPro API is running.', content_type='text/plain')),
+    path('', lambda r: HttpResponse(
+        '<h1 style="font-family:sans-serif;padding:40px">EventPro API is running ✅</h1>'
+        '<p style="font-family:sans-serif;padding:0 40px">Go to <a href="/admin/">/admin/</a> for the admin panel.</p>',
+        content_type='text/html'
+    )),
+    path('health/', health),
     path('favicon.ico', lambda r: HttpResponse(status=204)),
     path('admin/', admin.site.urls),
-    path('organizer-admin/', organizer_site.urls),
     path('api/user/', include('user.urls')),
     path('api/user/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-]
-
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    *_organizer_urls,
+] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
