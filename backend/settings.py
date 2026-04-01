@@ -14,8 +14,8 @@ DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 # Allow Render domain + any custom domain automatically
 ALLOWED_HOSTS = os.environ.get(
     'ALLOWED_HOSTS',
-    'localhost,127.0.0.1,event-backend-5-v9tx.onrender.com'
-).split(',') + ['event-backend-5-v9tx.onrender.com']
+    'localhost,127.0.0.1'
+)
 
 INSTALLED_APPS = [
     'jazzmin',
