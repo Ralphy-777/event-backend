@@ -47,13 +47,13 @@ MIDDLEWARE = [
 
 CORS_ALLOWED_ORIGINS = os.environ.get(
     'CORS_ALLOWED_ORIGINS',
-    'http://localhost:3000,http://127.0.0.1:3000,https://event-booking-17w311dcj-ralphy-777s-projects.vercel.app'
+    'http://localhost:3000,http://127.0.0.1:3000,https://event-bookings-mocmuxl39-ralphy-777s-projects.vercel.app,https://event-booking-17w311dcj-ralphy-777s-projects.vercel.app'
 ).split(',')
 CORS_ALLOW_ALL_ORIGINS = DEBUG  # allow all in dev, restrict in prod
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = os.environ.get(
     'CSRF_TRUSTED_ORIGINS',
-    'http://localhost:3000,http://127.0.0.1:3000,https://event-booking-17w311dcj-ralphy-777s-projects.vercel.app'
+    'http://localhost:3000,http://127.0.0.1:3000,https://event-bookings-mocmuxl39-ralphy-777s-projects.vercel.app,https://event-booking-17w311dcj-ralphy-777s-projects.vercel.app'
 ).split(',')
 
 ROOT_URLCONF = 'backend.urls'
@@ -162,7 +162,7 @@ PAYMONGO_SECRET_KEY = os.environ.get('PAYMONGO_SECRET_KEY', '')
 PAYMONGO_PUBLIC_KEY = os.environ.get('PAYMONGO_PUBLIC_KEY', '')
 
 # Frontend URL
-FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://event-booking-17w311dcj-ralphy-777s-projects.vercel.app')
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://event-bookings-mocmuxl39-ralphy-777s-projects.vercel.app')
 
 # Cache — use database cache on Render (no Redis needed)
 CACHES = {
