@@ -8,13 +8,20 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def env_list(name: str, default: str = '') -> list[str]:
+    value = os.environ.get(name, default)
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [item.strip() for item in str(value).split(',') if item.strip()]
+
 SECRET_KEY = os.environ.get('SECRET_KEY', 'fallback-insecure-key-change-in-production')
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 # Allow Render domain + any custom domain automatically
-ALLOWED_HOSTS = os.environ.get(
+ALLOWED_HOSTS = env_list(
     'ALLOWED_HOSTS',
-    'localhost,127.0.0.1'
+    'localhost,127.0.0.1,event-backend-5-v9tx.onrender.com'
 )
 
 INSTALLED_APPS = [
@@ -45,16 +52,16 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOWED_ORIGINS = os.environ.get(
+CORS_ALLOWED_ORIGINS = env_list(
     'CORS_ALLOWED_ORIGINS',
     'http://localhost:3000,http://127.0.0.1:3000,https://event-bookings-mocmuxl39-ralphy-777s-projects.vercel.app,https://event-booking-17w311dcj-ralphy-777s-projects.vercel.app'
-).split(',')
+)
 CORS_ALLOW_ALL_ORIGINS = DEBUG  # allow all in dev, restrict in prod
 CORS_ALLOW_CREDENTIALS = True
-CSRF_TRUSTED_ORIGINS = os.environ.get(
+CSRF_TRUSTED_ORIGINS = env_list(
     'CSRF_TRUSTED_ORIGINS',
     'http://localhost:3000,http://127.0.0.1:3000,https://event-bookings-mocmuxl39-ralphy-777s-projects.vercel.app,https://event-booking-17w311dcj-ralphy-777s-projects.vercel.app'
-).split(',')
+)
 
 ROOT_URLCONF = 'backend.urls'
 
