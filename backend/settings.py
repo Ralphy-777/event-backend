@@ -52,6 +52,7 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 ENABLE_JAZZMIN = env_bool('ENABLE_JAZZMIN', default=DJANGO_VERSION < (6, 0))
 
 INSTALLED_APPS = [
+    'jazzmin'
     'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
