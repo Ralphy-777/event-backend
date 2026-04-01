@@ -274,10 +274,15 @@ def register(request):
                 ),
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 recipient_list=[email],
-                fail_silently=True,
+                fail_silently=False,
             )
         except Exception as mail_err:
-            logger.warning('Registration email failed: %s', mail_err)
+            cache.delete(f'pending_reg_{email}')
+            logger.exception('Registration email failed for %s: %s', email, mail_err)
+            return Response(
+                {'message': 'We could not send the verification email. Please check the email service configuration and try again.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
         return Response({
             'message': 'Registration successful. Check your email for the verification code.',
@@ -401,18 +406,25 @@ def resend_verification_code(request):
     pending['code'] = code
     cache.set(f'pending_reg_{email}', pending, timeout=900)
 
-    send_mail(
-        subject='Your EventPro Verification Code',
-        message=(
-            f'Hi {pending["first_name"]},\n\n'
-            f'Your new verification code is: {code}\n\n'
-            f'Enter this code in the app to activate your account.\n\n'
+    try:
+        send_mail(
+            subject='Your EventPro Verification Code',
+            message=(
+                f'Hi {pending["first_name"]},\n\n'
+                f'Your new verification code is: {code}\n\n'
+                f'Enter this code in the app to activate your account.\n\n'
             f'— EventPro Team'
-        ),
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[email],
-        fail_silently=True,
-    )
+            ),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+    except Exception as mail_err:
+        logger.exception('Resend verification email failed for %s: %s', email, mail_err)
+        return Response(
+            {'message': 'We could not resend the verification email. Please check the email service configuration and try again.'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
     return Response({'message': 'A new verification code has been sent to your email.'})
 
 

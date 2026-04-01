@@ -14,7 +14,7 @@ DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 # Allow Render domain + any custom domain automatically
 ALLOWED_HOSTS = os.environ.get(
     'ALLOWED_HOSTS',
-    'localhost,127.0.0.1'
+    'localhost,127.0.0.1,event-backend-5-v9tx.onrender.com'
 ).split(',') + ['event-backend-5-v9tx.onrender.com']
 
 INSTALLED_APPS = [
@@ -47,10 +47,14 @@ MIDDLEWARE = [
 
 CORS_ALLOWED_ORIGINS = os.environ.get(
     'CORS_ALLOWED_ORIGINS',
-    'http://localhost:3000,http://127.0.0.1:3000'
+    'http://localhost:3000,http://127.0.0.1:3000,https://scsi-tonlineexam.vercel.app'
 ).split(',')
 CORS_ALLOW_ALL_ORIGINS = DEBUG  # allow all in dev, restrict in prod
 CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = os.environ.get(
+    'CSRF_TRUSTED_ORIGINS',
+    'http://localhost:3000,http://127.0.0.1:3000,https://scsi-tonlineexam.vercel.app'
+).split(',')
 
 ROOT_URLCONF = 'backend.urls'
 
@@ -158,7 +162,7 @@ PAYMONGO_SECRET_KEY = os.environ.get('PAYMONGO_SECRET_KEY', '')
 PAYMONGO_PUBLIC_KEY = os.environ.get('PAYMONGO_PUBLIC_KEY', '')
 
 # Frontend URL
-FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://scsi-tonlineexam.vercel.app')
 
 # Cache — use database cache on Render (no Redis needed)
 CACHES = {
