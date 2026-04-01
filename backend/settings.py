@@ -22,14 +22,30 @@ def env_bool(name: str, default: bool = False) -> bool:
         return default
     return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
 
+
+def with_extra_hosts(*hosts: str) -> list[str]:
+    items: list[str] = []
+    for host in hosts:
+        if host and host not in items:
+            items.append(host)
+    return items
+
 SECRET_KEY = os.environ.get('SECRET_KEY', 'fallback-insecure-key-change-in-production')
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 # Allow Render domain + any custom domain automatically
-ALLOWED_HOSTS = env_list(
-    'ALLOWED_HOSTS',
-    'localhost,127.0.0.1,event-backend-5-v9tx.onrender.com'
-)
+ALLOWED_HOSTS = [
+    'localhost',
+    '127.0.0.1',
+    'event-backend-5-v9tx.onrender.com',
+    '.onrender.com',
+    '.vercel.app',
+    os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip(),
+]
+ALLOWED_HOSTS = [h for h in ALLOWED_HOSTS if h]  # remove empty strings
+
+USE_X_FORWARDED_HOST = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 INSTALLED_APPS = [
     'jazzmin',
@@ -59,17 +75,15 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-_raw_cors_allowed_origins = os.environ.get(
-    'CORS_ALLOWED_ORIGINS',
-    'http://localhost:3000,http://127.0.0.1:3000,https://event-bookings-mocmuxl39-ralphy-777s-projects.vercel.app,https://event-booking-17w311dcj-ralphy-777s-projects.vercel.app'
-)
-CORS_ALLOW_ALL_ORIGINS = DEBUG or env_bool('CORS_ALLOW_ALL_ORIGINS', False) or str(_raw_cors_allowed_origins).strip().lower() == 'true'
-CORS_ALLOWED_ORIGINS = [] if CORS_ALLOW_ALL_ORIGINS else env_list('CORS_ALLOWED_ORIGINS', _raw_cors_allowed_origins)
+CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
-CSRF_TRUSTED_ORIGINS = env_list(
-    'CSRF_TRUSTED_ORIGINS',
-    'http://localhost:3000,http://127.0.0.1:3000,https://event-bookings-mocmuxl39-ralphy-777s-projects.vercel.app,https://event-booking-17w311dcj-ralphy-777s-projects.vercel.app'
-)
+CSRF_TRUSTED_ORIGINS = [
+    'http://localhost:3000',
+    'https://event-bookings-eosin.vercel.app',
+    'https://event-booking-chi.vercel.app',
+    'https://event-backend-5-v9tx.onrender.com',
+    'https://*.vercel.app',
+]
 
 ROOT_URLCONF = 'backend.urls'
 
@@ -177,7 +191,7 @@ PAYMONGO_SECRET_KEY = os.environ.get('PAYMONGO_SECRET_KEY', '')
 PAYMONGO_PUBLIC_KEY = os.environ.get('PAYMONGO_PUBLIC_KEY', '')
 
 # Frontend URL
-FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://event-bookings-mocmuxl39-ralphy-777s-projects.vercel.app')
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'https://event-bookings-eosin.vercel.app')
 
 # Cache — use database cache on Render (no Redis needed)
 CACHES = {
