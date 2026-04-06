@@ -18,6 +18,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 
 import os
+import importlib.util
 from datetime import timedelta
 from pathlib import Path
 
@@ -66,7 +67,6 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 INSTALLED_APPS = [
     'daphne',
-    'jazzmin',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -79,6 +79,10 @@ INSTALLED_APPS = [
     'corsheaders',
     'channels',
 ]
+
+# Keep backend booting even if jazzmin isn't installed in a deployment image.
+if importlib.util.find_spec('jazzmin') is not None:
+    INSTALLED_APPS.insert(1, 'jazzmin')
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
