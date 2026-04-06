@@ -8,6 +8,11 @@ from .models import Booking, Payment, EventType, Video, Review, ReviewReply, Not
 from datetime import datetime, date as date_type, timedelta
 from django.core.mail import send_mail
 from django.conf import settings
+from .email_utils import (
+    send_verification_email, send_password_reset_email, send_email_change_verification,
+    send_booking_confirmation_email, send_booking_status_email, send_guest_invitation_email,
+    send_cancellation_email, send_payment_confirmed_email, send_html_email,
+)
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
@@ -86,16 +91,21 @@ def _send_booking_reminders():
         msg = f'Reminder: Your {booking.event_type} event is tomorrow ({booking.date})!'
         Notification.objects.create(user=booking.user, message=msg)
         send_ws_notification(booking.user.id, msg, notif_type='reminder_24h')
-        send_mail_async(
+        event_time_str = booking.time.strftime('%I:%M %p') if hasattr(booking.time, 'strftime') else (str(booking.time) if booking.time else 'Whole Day')
+        send_html_email(
             subject='EventPro — Your Event is Tomorrow!',
-            message=(
-                f'Hi {booking.user.first_name},\n\n'
-                f'Just a reminder that your {booking.event_type} event is scheduled for tomorrow ({booking.date}).\n'
-                f'Venue: {booking.location}\n'
-                f'Time: {booking.time.strftime("%I:%M %p") if hasattr(booking.time, "strftime") else (str(booking.time) if booking.time else "Whole Day")}\n\n'
-                f'— EventPro Team'
+            html_body=(
+                f'<h1 style="color:#fff;font-size:22px;font-weight:900;margin:0 0 8px;">Your Event is Tomorrow! 🎉</h1>'
+                f'<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 16px;">Hi <strong style="color:#e2e8f0;">{booking.user.first_name}</strong>, just a reminder about your upcoming event.</p>'
+                f'<table width="100%" style="background:rgba(255,255,255,0.04);border-radius:10px;padding:16px;margin:16px 0;">'
+                f'<tr><td style="padding:6px 0;color:#64748b;font-size:13px;width:100px;">Event</td><td style="color:#e2e8f0;font-size:13px;font-weight:600;">{booking.event_type}</td></tr>'
+                f'<tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Date</td><td style="color:#e2e8f0;font-size:13px;font-weight:600;">{booking.date}</td></tr>'
+                f'<tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Time</td><td style="color:#e2e8f0;font-size:13px;font-weight:600;">{event_time_str}</td></tr>'
+                f'<tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Venue</td><td style="color:#e2e8f0;font-size:13px;font-weight:600;">{booking.location}</td></tr>'
+                f'</table>'
             ),
             recipient_list=[booking.user.email],
+            plain_text=f'Hi {booking.user.first_name},\n\nReminder: Your {booking.event_type} is tomorrow ({booking.date}) at {event_time_str}.\nVenue: {booking.location}\n\n— EventPro Team',
         )
         booking.reminder_sent = True
         booking.save(update_fields=['reminder_sent'])
@@ -146,66 +156,35 @@ def _check_payment_deadlines():
         msg = f'Your {booking.event_type} booking on {booking.date} was auto-declined because payment was not submitted within 3 days.'
         Notification.objects.create(user=booking.user, message=msg)
         send_ws_notification(booking.user.id, msg, notif_type='booking_declined')
-        send_mail_async(
+        send_html_email(
             subject='EventPro — Booking Auto-Declined (Payment Deadline)',
-            message=(
-                f'Hi {booking.user.first_name},\n\n'
-                f'Your {booking.event_type} booking on {booking.date} has been automatically declined '
-                f'because payment was not submitted within 3 days of booking.\n\n'
-                f'Please create a new booking and complete payment promptly.\n\n'
-                f'— EventPro Team'
+            html_body=(
+                f'<h1 style="color:#fff;font-size:22px;font-weight:900;margin:0 0 8px;">Booking Auto-Declined</h1>'
+                f'<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 16px;">Hi <strong style="color:#e2e8f0;">{booking.user.first_name}</strong>, your booking was automatically declined because payment was not submitted within 3 days.</p>'
+                f'<table width="100%" style="background:rgba(255,255,255,0.04);border-radius:10px;padding:16px;margin:16px 0;">'
+                f'<tr><td style="padding:6px 0;color:#64748b;font-size:13px;width:100px;">Event</td><td style="color:#e2e8f0;font-size:13px;font-weight:600;">{booking.event_type}</td></tr>'
+                f'<tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Date</td><td style="color:#e2e8f0;font-size:13px;font-weight:600;">{booking.date}</td></tr>'
+                f'<tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Status</td><td style="color:#ef4444;font-size:13px;font-weight:700;">Auto-Declined</td></tr>'
+                f'</table>'
+                f'<p style="color:#94a3b8;font-size:14px;">Please create a new booking and complete payment promptly.</p>'
             ),
             recipient_list=[booking.user.email],
+            plain_text=f'Hi {booking.user.first_name},\n\nYour {booking.event_type} booking on {booking.date} was auto-declined due to missed payment deadline.\n\n— EventPro Team',
         )
 
 _start_deadline_checker()
 
 
 def _send_invitation_emails(booking, confirmed=False):
-    """Send invitation emails to all guests listed in invited_emails."""
+    """Send HTML invitation emails to all guests listed in invited_emails."""
     if not booking.invited_emails:
         return
     emails = [e.strip() for e in booking.invited_emails.replace(';', ',').split(',') if e.strip()]
     if not emails:
         return
     host_name = f'{booking.user.first_name} {booking.user.last_name}'
-    event_date = booking.date.strftime('%B %d, %Y') if hasattr(booking.date, 'strftime') else str(booking.date)
-    if not booking.time:
-        event_time = 'Whole Day'
-    elif hasattr(booking.time, 'strftime'):
-        event_time = booking.time.strftime('%I:%M %p')
-    else:
-        event_time = str(booking.time)
-    if confirmed:
-        subject = f"You're Invited! {booking.event_type} on {event_date} — Confirmed!"
-        message = (
-            f'Hello,\n\n'
-            f'Great news! {host_name} has invited you to their {booking.event_type} '
-            f'and it has been confirmed!\n\n'
-            f'Event Details:\n'
-            f'  Type  : {booking.event_type}\n'
-            f'  Date  : {event_date}\n'
-            f'  Time  : {event_time}\n'
-            f'  Venue : {booking.location}\n\n'
-            f'We look forward to seeing you there!\n\n'
-            f'\u2014 EventPro Team'
-        )
-    else:
-        subject = f"You've Been Invited to {host_name}'s {booking.event_type}!"
-        message = (
-            f'Hello,\n\n'
-            f'{host_name} has invited you to their upcoming {booking.event_type} event.\n\n'
-            f'Event Details:\n'
-            f'  Type  : {booking.event_type}\n'
-            f'  Date  : {event_date}\n'
-            f'  Time  : {event_time}\n'
-            f'  Venue : {booking.location}\n\n'
-            f'Note: This booking is still pending organizer confirmation.\n'
-            f'You will receive another email once it is confirmed.\n\n'
-            f'\u2014 EventPro Team'
-        )
     for email in emails:
-        send_mail_async(subject=subject, message=message, recipient_list=[email])
+        send_guest_invitation_email(email, host_name, booking, confirmed=confirmed)
 
 
 @api_view(['GET'])
@@ -261,19 +240,7 @@ def register(request):
         }, timeout=900)  # 15 minutes
 
         try:
-            send_mail(
-                subject='Your EventPro Verification Code',
-                message=(
-                    f'Hi {data.get("first_name")},\n\n'
-                    f'Your verification code is: {code}\n\n'
-                    f'Enter this code in the app to activate your account.\n'
-                    f'This code is valid for 15 minutes.\n\n'
-                    f'\u2014 EventPro Team'
-                ),
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[email],
-                fail_silently=False,
-            )
+            send_verification_email(email, data.get('first_name', ''), code)
         except Exception as mail_err:
             cache.delete(f'pending_reg_{email}')
             logger.exception('Registration email failed for %s: %s', email, mail_err)
@@ -303,21 +270,7 @@ def request_email_change(request):
         return Response({'message': 'This email is already in use'}, status=status.HTTP_400_BAD_REQUEST)
     code = ''.join(random.choices(string.digits, k=6))
     cache.set(f'email_change_{request.user.id}', {'new_email': new_email, 'code': code}, timeout=600)
-    send_mail(
-        subject='Verify Your Email Change — EventPro',
-        message=(
-            f'Hi {request.user.first_name},\n\n'
-            f'You requested to change your email to: {new_email}\n\n'
-            f'Your verification code is: {code}\n\n'
-            f'Enter this code to confirm the change.\n'
-            f'This code is valid for 10 minutes.\n\n'
-            f'If you did not request this, ignore this email.\n\n'
-            f'— EventPro Team'
-        ),
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[request.user.email],
-        fail_silently=False,
-    )
+    send_email_change_verification(request.user.email, request.user.first_name, new_email, code)
     return Response({'message': f'Verification code sent to your current email'})
 
 
@@ -352,19 +305,7 @@ def forgot_password(request):
     user.verification_code = code
     user.save()
 
-    send_mail(
-        subject='Your EventPro Password Reset Code',
-        message=(
-            f'Hi {user.first_name},\n\n'
-            f'Your password reset code is: {code}\n\n'
-            f'Enter this code in the app to reset your password.\n'
-            f'If you did not request this, ignore this email.\n\n'
-            f'— EventPro Team'
-        ),
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[user.email],
-        fail_silently=False,
-    )
+    send_password_reset_email(user.email, user.first_name, code)
     return Response({'message': 'If that email exists, a reset code has been sent.'})
 
 
@@ -405,18 +346,7 @@ def resend_verification_code(request):
     cache.set(f'pending_reg_{email}', pending, timeout=900)
 
     try:
-        send_mail(
-            subject='Your EventPro Verification Code',
-            message=(
-                f'Hi {pending["first_name"]},\n\n'
-                f'Your new verification code is: {code}\n\n'
-                f'Enter this code in the app to activate your account.\n\n'
-            f'— EventPro Team'
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
+        send_verification_email(email, pending.get('first_name', ''), code)
     except Exception as mail_err:
         logger.exception('Resend verification email failed for %s: %s', email, mail_err)
         return Response(
@@ -713,23 +643,7 @@ def create_booking(request):
             send_ws_notification(org.id, org_msg, notif_type='new_booking')
 
         # Send booking confirmation email to client (async - non-blocking)
-        send_mail_async(
-            subject='Your EventPro Booking Request Received',
-            message=(
-                f'Hi {request.user.first_name},\n\n'
-                f'We received your booking request. Here are the details:\n\n'
-                f'Event: {event_type}\n'
-                f'Date: {date}\n'
-                f'Time: {data.get("time") or "Whole Day"}\n'
-                f'Guests: {capacity}\n'
-                f'Venue: {booking.location}\n'
-                f'Total Amount: \u20b1{float(booking.total_amount):,.2f}\n'
-                f'Payment Method: {payment_method}\n\n'
-                f'Your booking is now PENDING. You will receive another email once the organizer confirms it.\n\n'
-                f'— EventPro Team'
-            ),
-            recipient_list=[request.user.email],
-        )
+        send_booking_confirmation_email(request.user.email, request.user.first_name, booking)
 
         # Send invitation emails to guests
         _send_invitation_emails(booking, confirmed=False)
@@ -804,36 +718,10 @@ def update_booking_status(request, booking_id):
 
         # Send confirmation email to client (async - non-blocking)
         if new_status == 'confirmed':
-            send_mail_async(
-                subject='Your EventPro Booking is Confirmed!',
-                message=(
-                    f'Hi {booking.user.first_name},\n\n'
-                    f'Great news! Your booking has been confirmed.\n\n'
-                    f'Event: {booking.event_type}\n'
-                    f'Date: {booking.date}\n'
-                    f'Time: {booking.time or "TBD"}\n'
-                    f'Venue: {booking.location}\n'
-                    f'Guests: {booking.capacity}\n\n'
-                    f'Thank you for choosing EventPro!\n'
-                    f'— EventPro Team'
-                ),
-                recipient_list=[booking.user.email],
-            )
-            # Send confirmed invitation emails to guests
+            send_booking_status_email(booking.user.email, booking.user.first_name, booking, 'confirmed')
             _send_invitation_emails(booking, confirmed=True)
         elif new_status == 'declined':
-            send_mail_async(
-                subject='Update on Your EventPro Booking',
-                message=(
-                    f'Hi {booking.user.first_name},\n\n'
-                    f'Unfortunately, your booking for {booking.event_type} on {booking.date} '
-                    f'could not be confirmed at this time.\n\n'
-                    f'Reason: {decline_reason}\n\n'
-                    f'Please contact us or try booking a different date.\n\n'
-                    f'— EventPro Team'
-                ),
-                recipient_list=[booking.user.email],
-            )
+            send_booking_status_email(booking.user.email, booking.user.first_name, booking, 'declined', decline_reason)
 
         return Response({'message': f'Booking {new_status} successfully'})
     except Booking.DoesNotExist:
@@ -895,19 +783,7 @@ def cancel_booking(request, booking_id):
             Notification.objects.create(user=org, message=org_msg)
             send_ws_notification(org.id, org_msg, notif_type='booking_cancelled')
 
-        send_mail_async(
-            subject='Your EventPro Booking Has Been Cancelled',
-            message=(
-                f'Hi {request.user.first_name},\n\n'
-                f'Your booking has been cancelled.\n\n'
-                f'Event: {event_type}\n'
-                f'Date: {date}\n'
-                + (f'Reason: {cancel_reason}\n' if cancel_reason else '') +
-                f'\nIf this was a mistake, please create a new booking.\n\n'
-                f'— EventPro Team'
-            ),
-            recipient_list=[request.user.email],
-        )
+        send_cancellation_email(request.user.email, request.user.first_name, event_type, date, cancel_reason)
 
         return Response({'message': 'Booking cancelled successfully'})
     except Booking.DoesNotExist:
@@ -1209,16 +1085,7 @@ def paymongo_webhook(request):
                 org_msg = f'GCash payment received via PayMongo for {booking.event_type} booking (#{booking.id}) by {booking.user.first_name} {booking.user.last_name}. Amount: ₱{booking.total_amount}'
                 Notification.objects.create(user=org, message=org_msg)
                 send_ws_notification(org.id, org_msg, notif_type='payment_confirmed')
-            send_mail_async(
-                subject='EventPro — GCash Payment Confirmed!',
-                message=(
-                    f'Hi {booking.user.first_name},\n\n'
-                    f'Your GCash payment of ₱{booking.total_amount} for your {booking.event_type} booking on {booking.date} has been confirmed.\n\n'
-                    f'Reference: {reference_number}\n\n'
-                    f'— EventPro Team'
-                ),
-                recipient_list=[booking.user.email],
-            )
+            send_payment_confirmed_email(booking.user.email, booking.user.first_name, booking, reference_number)
 
         return Response({'received': True})
     except Exception as e:
@@ -1454,20 +1321,21 @@ def contact_form(request):
             subject=f'[EventPro Contact] {subject}',
             message=(f'From: {name} <{email}>\n\n{message}'),
             from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=['ralphydev@gmail.com'],
+            recipient_list=['ralph.villarojo@gmail.com'],
             fail_silently=True,
         )
-        send_mail(
+        # Auto-reply to sender
+        send_html_email(
             subject='We received your message — EventPro',
-            message=(
-                f'Hi {name},\n\n'
-                f'Thanks for reaching out! We received your message and will get back to you within 24 hours.\n\n'
-                f'Your message:\n{message}\n\n'
-                f'— EventPro Team'
+            html_body=(
+                f'<h1 style="color:#fff;font-size:22px;font-weight:900;margin:0 0 8px;">Message Received! ✉️</h1>'
+                f'<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 16px;">Hi <strong style="color:#e2e8f0;">{name}</strong>, thanks for reaching out! We\'ll get back to you within 24 hours.</p>'
+                f'<div style="background:rgba(255,255,255,0.04);border-radius:10px;padding:16px;margin:16px 0;">'
+                f'<p style="color:#64748b;font-size:12px;margin:0 0 4px;text-transform:uppercase;letter-spacing:1px;">Your message</p>'
+                f'<p style="color:#e2e8f0;font-size:14px;margin:0;">{message}</p></div>'
             ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[email],
-            fail_silently=True,
+            plain_text=f'Hi {name},\n\nThanks for reaching out! We received your message and will get back to you within 24 hours.\n\n— EventPro Team',
         )
     except OSError as e:
         logger.warning('Contact form email failed: %s', e)
@@ -1509,15 +1377,17 @@ def reply_contact_message(request, message_id):
     contact.is_read = True
     contact.replied_at = timezone.now()
     contact.save()
-    send_mail_async(
+    send_html_email(
         subject=f'Re: {contact.subject} — EventPro',
-        message=(
-            f'Hi {contact.name},\n\n'
-            f'Thank you for contacting us. Here is our response:\n\n'
-            f'{reply_text}\n\n'
-            f'— EventPro Team'
+        html_body=(
+            f'<h1 style="color:#fff;font-size:22px;font-weight:900;margin:0 0 8px;">We replied to your message 💬</h1>'
+            f'<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 16px;">Hi <strong style="color:#e2e8f0;">{contact.name}</strong>, here is our response to your inquiry.</p>'
+            f'<div style="background:rgba(14,165,233,0.08);border:1px solid rgba(14,165,233,0.2);border-radius:10px;padding:16px;margin:16px 0;">'
+            f'<p style="color:#64748b;font-size:12px;margin:0 0 6px;text-transform:uppercase;letter-spacing:1px;">Our reply</p>'
+            f'<p style="color:#e2e8f0;font-size:14px;margin:0;line-height:1.6;">{reply_text}</p></div>'
         ),
         recipient_list=[contact.email],
+        plain_text=f'Hi {contact.name},\n\nOur reply:\n{reply_text}\n\n— EventPro Team',
     )
     return Response({'message': 'Reply sent successfully'})
 

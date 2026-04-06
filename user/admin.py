@@ -14,6 +14,11 @@ class OrganizerAdminSite(AdminSite):
     index_title = 'Manage Bookings'
 organizer_site = OrganizerAdminSite(name='organizer_admin')
 
+# Keep the main /admin/ endpoint on Django's original branding/layout.
+admin.site.site_header = 'Django administration'
+admin.site.site_title = 'Django site admin'
+admin.site.index_title = 'Site administration'
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
