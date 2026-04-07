@@ -1414,18 +1414,28 @@ def contact_form(request):
 def get_contact_messages(request):
     if not request.user.is_organizer:
         return Response({'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
-    messages = ContactMessage.objects.all()
-    return Response([{
-        'id': m.id,
-        'name': m.name,
-        'email': m.email,
-        'subject': m.subject,
-        'message': m.message,
-        'reply': m.reply,
-        'is_read': m.is_read,
-        'replied_at': m.replied_at.isoformat() if m.replied_at else None,
-        'created_at': m.created_at.isoformat(),
-    } for m in messages])
+    try:
+        contact_msgs = ContactMessage.objects.all()
+        data = []
+        for m in contact_msgs:
+            try:
+                data.append({
+                    'id': m.id,
+                    'name': m.name,
+                    'email': m.email,
+                    'subject': m.subject,
+                    'message': m.message,
+                    'reply': m.reply or '',
+                    'is_read': m.is_read,
+                    'replied_at': m.replied_at.isoformat() if m.replied_at else None,
+                    'created_at': m.created_at.isoformat(),
+                })
+            except Exception as e:
+                logger.error('get_contact_messages row error id=%s: %s', m.id, e)
+        return Response(data)
+    except Exception as e:
+        logger.exception('get_contact_messages error: %s', e)
+        return Response({'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
