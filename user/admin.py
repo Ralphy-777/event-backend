@@ -3,7 +3,7 @@ from django.contrib.auth.admin import UserAdmin
 from django.utils.html import format_html
 from .models import (
     User, Booking, Payment, EventType,
-    Review, ReviewReply, Notification, ContactMessage, GalleryVideo,
+    Review, ReviewReply, Notification, ContactMessage,
 )
 
 # organizer_site kept for backward compat with urls.py import
@@ -14,13 +14,10 @@ class OrganizerAdminSite(AdminSite):
     index_title = 'Manage Bookings'
 organizer_site = OrganizerAdminSite(name='organizer_admin')
 
-# Keep the main /admin/ endpoint on Django's original branding/layout.
 admin.site.site_header = 'Django administration'
 admin.site.site_title = 'Django site admin'
 admin.site.index_title = 'Site administration'
 
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _badge(text, color):
     return format_html(
@@ -38,8 +35,6 @@ STATUS_COLORS = {
     'rejected':             '#ef4444',
 }
 
-
-# ── User ─────────────────────────────────────────────────────────────────────
 
 @admin.register(User)
 class CustomUserAdmin(UserAdmin):
@@ -82,8 +77,6 @@ class CustomUserAdmin(UserAdmin):
             obj.email_verified = True
         super().save_model(request, obj, form, change)
 
-
-# ── Booking ───────────────────────────────────────────────────────────────────
 
 @admin.register(Booking)
 class BookingAdmin(admin.ModelAdmin):
@@ -130,15 +123,13 @@ class BookingAdmin(admin.ModelAdmin):
     def approve_bookings(self, request, queryset):
         updated = queryset.filter(status='pending').update(status='confirmed')
         self.message_user(request, f'{updated} booking(s) confirmed.')
-    approve_bookings.short_description = '✅ Approve selected bookings'
+    approve_bookings.short_description = 'Approve selected bookings'
 
     def decline_bookings(self, request, queryset):
         updated = queryset.filter(status='pending').update(status='declined')
         self.message_user(request, f'{updated} booking(s) declined.')
-    decline_bookings.short_description = '❌ Decline selected bookings'
+    decline_bookings.short_description = 'Decline selected bookings'
 
-
-# ── Payment ───────────────────────────────────────────────────────────────────
 
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
@@ -160,8 +151,6 @@ class PaymentAdmin(admin.ModelAdmin):
     method_badge.short_description = 'Method'
 
 
-# ── Event Type ────────────────────────────────────────────────────────────────
-
 @admin.register(EventType)
 class EventTypeAdmin(admin.ModelAdmin):
     list_display  = ['event_type', 'image_preview', 'price_display', 'max_capacity', 'people_per_table', 'active_badge', 'updated_at']
@@ -173,13 +162,13 @@ class EventTypeAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ('Basic Info',         {'fields': ('event_type', 'description', 'is_active')}),
-        ('Image',              {'fields': ('image_url', 'image_preview'), 'description': '💡 Paste an image URL (e.g. from Google Drive, Imgur, Cloudinary). File upload resets on Render redeploy.'}),
+        ('Image',              {'fields': ('image_url', 'image_preview')}),
         ('Pricing & Capacity', {'fields': ('price', 'max_capacity', 'people_per_table', 'max_invited_emails')}),
         ('Timestamps',         {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
     )
 
     def price_display(self, obj):
-        return f'₱{obj.price:,.2f}'
+        return f'P{obj.price:,.2f}'
     price_display.short_description = 'Price'
 
     def active_badge(self, obj):
@@ -192,10 +181,6 @@ class EventTypeAdmin(admin.ModelAdmin):
         return '— Paste an image URL above'
     image_preview.short_description = 'Preview'
 
-
-
-
-# ── Review ────────────────────────────────────────────────────────────────────
 
 @admin.register(Review)
 class ReviewAdmin(admin.ModelAdmin):
@@ -210,8 +195,8 @@ class ReviewAdmin(admin.ModelAdmin):
     reviewer.short_description = 'Reviewer'
 
     def stars(self, obj):
-        filled = '★' * obj.rating
-        empty  = '☆' * (5 - obj.rating)
+        filled = '*' * obj.rating
+        empty  = '-' * (5 - obj.rating)
         color  = '#f59e0b' if obj.rating >= 4 else ('#ef4444' if obj.rating <= 2 else '#94a3b8')
         return format_html('<span style="color:{};font-size:14px">{}{}</span>', color, filled, empty)
     stars.short_description = 'Rating'
@@ -221,11 +206,9 @@ class ReviewAdmin(admin.ModelAdmin):
     event_type_display.short_description = 'Event'
 
     def short_comment(self, obj):
-        return obj.comment[:60] + '…' if len(obj.comment) > 60 else obj.comment
+        return obj.comment[:60] + '...' if len(obj.comment) > 60 else obj.comment
     short_comment.short_description = 'Comment'
 
-
-# ── Review Reply ──────────────────────────────────────────────────────────────
 
 @admin.register(ReviewReply)
 class ReviewReplyAdmin(admin.ModelAdmin):
@@ -239,11 +222,9 @@ class ReviewReplyAdmin(admin.ModelAdmin):
     review_link.short_description = 'Review'
 
     def short_comment(self, obj):
-        return obj.comment[:60] + '…' if len(obj.comment) > 60 else obj.comment
+        return obj.comment[:60] + '...' if len(obj.comment) > 60 else obj.comment
     short_comment.short_description = 'Reply'
 
-
-# ── Notification ──────────────────────────────────────────────────────────────
 
 @admin.register(Notification)
 class NotificationAdmin(admin.ModelAdmin):
@@ -255,7 +236,7 @@ class NotificationAdmin(admin.ModelAdmin):
     actions = ['mark_read']
 
     def short_message(self, obj):
-        return obj.message[:80] + '…' if len(obj.message) > 80 else obj.message
+        return obj.message[:80] + '...' if len(obj.message) > 80 else obj.message
     short_message.short_description = 'Message'
 
     def read_badge(self, obj):
@@ -265,10 +246,8 @@ class NotificationAdmin(admin.ModelAdmin):
     def mark_read(self, request, queryset):
         queryset.update(is_read=True)
         self.message_user(request, 'Marked as read.')
-    mark_read.short_description = '✅ Mark selected as read'
+    mark_read.short_description = 'Mark selected as read'
 
-
-# ── Contact Message ───────────────────────────────────────────────────────────
 
 @admin.register(ContactMessage)
 class ContactMessageAdmin(admin.ModelAdmin):
@@ -292,26 +271,3 @@ class ContactMessageAdmin(admin.ModelAdmin):
     def replied_badge(self, obj):
         return _badge('Replied', '#10b981') if obj.reply else _badge('Pending', '#94a3b8')
     replied_badge.short_description = 'Reply'
-
-
-# ── Gallery Video ─────────────────────────────────────────────────────────────
-
-@admin.register(GalleryVideo)
-class GalleryVideoAdmin(admin.ModelAdmin):
-    list_display  = ['title', 'category', 'order', 'active_badge', 'created_at']
-    list_editable = ['order']
-    list_filter   = ['is_active', 'category']
-    search_fields = ['title', 'description']
-    ordering      = ['order', '-created_at']
-    readonly_fields = ['created_at']
-
-    fieldsets = (
-        ('Video Info', {'fields': ('title', 'description', 'category')}),
-        ('Files',      {'fields': ('video_file', 'thumbnail'), 'description': '📹 Upload an MP4 video. Thumbnail is optional.'}),
-        ('Display',    {'fields': ('order', 'is_active')}),
-        ('Timestamps', {'fields': ('created_at',), 'classes': ('collapse',)}),
-    )
-
-    def active_badge(self, obj):
-        return _badge('Active', '#10b981') if obj.is_active else _badge('Inactive', '#ef4444')
-    active_badge.short_description = 'Status'

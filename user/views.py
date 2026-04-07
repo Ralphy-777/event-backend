@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import Booking, Payment, EventType, Review, ReviewReply, Notification, ContactMessage, GalleryVideo
+from .models import Booking, Payment, EventType, Review, ReviewReply, Notification, ContactMessage
 from datetime import datetime, date as date_type, timedelta
 from django.core.mail import send_mail
 from django.conf import settings
@@ -186,31 +186,6 @@ def _send_invitation_emails(booking, confirmed=False):
     for email in emails:
         send_guest_invitation_email(email, host_name, booking, confirmed=confirmed)
 
-
-
-@api_view(['GET'])
-def get_gallery_videos(request):
-    videos = GalleryVideo.objects.filter(is_active=True).select_related('category')
-    data = []
-    for v in videos:
-        try:
-            video_url = request.build_absolute_uri(v.video_file.url) if v.video_file else None
-        except Exception:
-            video_url = None
-        try:
-            thumbnail_url = request.build_absolute_uri(v.thumbnail.url) if v.thumbnail else None
-        except Exception:
-            thumbnail_url = None
-        data.append({
-            'id': v.id,
-            'title': v.title,
-            'video_url': video_url,
-            'thumbnail_url': thumbnail_url,
-            'description': v.description,
-            'category': v.category_name,
-            'order': v.order,
-        })
-    return Response(data)
 
 
 @api_view(['GET'])

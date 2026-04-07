@@ -18,7 +18,6 @@ urlpatterns = [
     path('profile/change-email/', views.request_email_change, name='request_email_change'),
     path('profile/verify-email-change/', views.verify_email_change, name='verify_email_change'),
     path('event-types/', views.get_event_types, name='get_event_types'),
-    path('videos/', views.get_gallery_videos, name='get_gallery_videos'),
     path('gcash/initiate/', views.initiate_gcash_payment, name='initiate_gcash_payment'),
     path('gcash/notify/', views.gcash_payment_notify, name='gcash_payment_notify'),
     path('paymongo/gcash/', views.create_paymongo_gcash, name='create_paymongo_gcash'),

@@ -8,5 +8,5 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        # Video table already dropped in 0033
+        # Table dropped via raw SQL in 0033. State deletion handled in 0038.
     ]

@@ -176,32 +176,3 @@ class ContactMessage(models.Model):
 
     def __str__(self):
         return f"{self.name} \u2014 {self.subject}"
-
-
-
-class GalleryVideo(models.Model):
-    title = models.CharField(max_length=200)
-    video_file = models.FileField(upload_to='gallery_videos/', null=True, blank=True, help_text='Upload MP4 video file')
-    thumbnail = models.ImageField(upload_to='gallery_thumbnails/', null=True, blank=True, help_text='Optional thumbnail image')
-    description = models.TextField(blank=True)
-    category = models.ForeignKey(
-        EventType,
-        on_delete=models.SET_NULL,
-        null=True, blank=True,
-        related_name='gallery_videos',
-    )
-    order = models.IntegerField(default=0, help_text='Lower number = appears first')
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    @property
-    def category_name(self):
-        return self.category.event_type if self.category else 'General'
-
-    class Meta:
-        ordering = ['order', '-created_at']
-        verbose_name = 'Gallery Video'
-        verbose_name_plural = 'Gallery Videos'
-
-    def __str__(self):
-        return self.title

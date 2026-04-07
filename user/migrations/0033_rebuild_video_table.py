@@ -1,5 +1,4 @@
-from django.db import migrations, models
-import django.db.models.deletion
+from django.db import migrations
 
 
 class Migration(migrations.Migration):
@@ -9,8 +8,13 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunSQL(
-            sql="DROP TABLE IF EXISTS user_video CASCADE;",
-            reverse_sql="",
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql="DROP TABLE IF EXISTS user_video CASCADE;",
+                    reverse_sql="",
+                ),
+            ],
+            state_operations=[],  # leave state alone — 0034 will delete it
         ),
     ]
