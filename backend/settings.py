@@ -74,6 +74,7 @@ USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 INSTALLED_APPS = [
+    'jazzmin',
     'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
@@ -87,10 +88,6 @@ INSTALLED_APPS = [
     'corsheaders',
     'channels',
 ]
-
-# Keep backend booting even if jazzmin isn't installed in a deployment image.
-if importlib.util.find_spec('jazzmin') is not None:
-    INSTALLED_APPS.insert(1, 'jazzmin')
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
