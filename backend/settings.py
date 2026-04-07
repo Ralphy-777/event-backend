@@ -277,15 +277,12 @@ else:
 
 # Email
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
-EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
 EMAIL_USE_TLS = True
+EMAIL_USE_SSL = False
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '').strip()
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '').strip()
 DEFAULT_FROM_EMAIL = f'EventPro <{EMAIL_HOST_USER}>' if EMAIL_HOST_USER else 'EventPro <noreply@eventpro.com>'
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 EMAIL_TIMEOUT = 30
-
-# Email Bridge (Nodemailer fallback)
-EMAIL_BRIDGE_URL = os.environ.get('EMAIL_BRIDGE_URL', '').strip()
-EMAIL_BRIDGE_SECRET = os.environ.get('EMAIL_BRIDGE_SECRET', '').strip()
