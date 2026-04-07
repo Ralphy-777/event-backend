@@ -3,7 +3,7 @@ from django.contrib.auth.admin import UserAdmin
 from django.utils.html import format_html
 from .models import (
     User, Booking, Payment, EventType,
-    Video, Review, ReviewReply, Notification, ContactMessage,
+    Review, ReviewReply, Notification, ContactMessage, GalleryVideo,
 )
 
 # organizer_site kept for backward compat with urls.py import
@@ -164,17 +164,18 @@ class PaymentAdmin(admin.ModelAdmin):
 
 @admin.register(EventType)
 class EventTypeAdmin(admin.ModelAdmin):
-    list_display  = ['event_type', 'price_display', 'max_capacity', 'people_per_table', 'active_badge', 'updated_at']
+    list_display  = ['event_type', 'image_preview', 'price_display', 'max_capacity', 'people_per_table', 'active_badge', 'updated_at']
     list_editable = ['max_capacity', 'people_per_table']
     list_filter   = ['is_active']
     search_fields = ['event_type', 'description']
     ordering      = ['event_type']
-    readonly_fields = ['created_at', 'updated_at']
+    readonly_fields = ['created_at', 'updated_at', 'image_preview']
 
     fieldsets = (
-        ('Basic Info',       {'fields': ('event_type', 'description', 'is_active')}),
-        ('Pricing & Capacity', {'fields': ('price', 'max_capacity', 'people_per_table')}),
-        ('Timestamps',       {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
+        ('Basic Info',         {'fields': ('event_type', 'description', 'is_active')}),
+        ('Image',              {'fields': ('image_url', 'image_preview'), 'description': '💡 Paste an image URL (e.g. from Google Drive, Imgur, Cloudinary). File upload resets on Render redeploy.'}),
+        ('Pricing & Capacity', {'fields': ('price', 'max_capacity', 'people_per_table', 'max_invited_emails')}),
+        ('Timestamps',         {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
     )
 
     def price_display(self, obj):
@@ -185,28 +186,13 @@ class EventTypeAdmin(admin.ModelAdmin):
         return _badge('Active', '#10b981') if obj.is_active else _badge('Inactive', '#ef4444')
     active_badge.short_description = 'Status'
 
+    def image_preview(self, obj):
+        if obj.image_url:
+            return format_html('<img src="{}" style="height:80px;border-radius:8px;object-fit:cover;" />', obj.image_url)
+        return '— Paste an image URL above'
+    image_preview.short_description = 'Preview'
 
-# ── Video ─────────────────────────────────────────────────────────────────────
 
-@admin.register(Video)
-class VideoAdmin(admin.ModelAdmin):
-    list_display  = ['title', 'category', 'order', 'active_badge', 'created_at']
-    list_editable = ['order']
-    list_filter   = ['is_active', 'category']
-    search_fields = ['title', 'description']
-    ordering      = ['order', '-created_at']
-    readonly_fields = ['created_at', 'updated_at']
-
-    fieldsets = (
-        ('Video Info',      {'fields': ('title', 'description', 'category')}),
-        ('URLs',            {'fields': ('video_url', 'thumbnail_url'), 'description': 'Paste a YouTube URL e.g. https://www.youtube.com/watch?v=VIDEO_ID'}),
-        ('Display',         {'fields': ('order', 'is_active')}),
-        ('Timestamps',      {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
-    )
-
-    def active_badge(self, obj):
-        return _badge('Active', '#10b981') if obj.is_active else _badge('Inactive', '#ef4444')
-    active_badge.short_description = 'Status'
 
 
 # ── Review ────────────────────────────────────────────────────────────────────
@@ -306,3 +292,26 @@ class ContactMessageAdmin(admin.ModelAdmin):
     def replied_badge(self, obj):
         return _badge('Replied', '#10b981') if obj.reply else _badge('Pending', '#94a3b8')
     replied_badge.short_description = 'Reply'
+
+
+# ── Gallery Video ─────────────────────────────────────────────────────────────
+
+@admin.register(GalleryVideo)
+class GalleryVideoAdmin(admin.ModelAdmin):
+    list_display  = ['title', 'category', 'order', 'active_badge', 'created_at']
+    list_editable = ['order']
+    list_filter   = ['is_active', 'category']
+    search_fields = ['title', 'description']
+    ordering      = ['order', '-created_at']
+    readonly_fields = ['created_at']
+
+    fieldsets = (
+        ('Video Info', {'fields': ('title', 'description', 'category')}),
+        ('Files',      {'fields': ('video_file', 'thumbnail'), 'description': '📹 Upload an MP4 video. Thumbnail is optional.'}),
+        ('Display',    {'fields': ('order', 'is_active')}),
+        ('Timestamps', {'fields': ('created_at',), 'classes': ('collapse',)}),
+    )
+
+    def active_badge(self, obj):
+        return _badge('Active', '#10b981') if obj.is_active else _badge('Inactive', '#ef4444')
+    active_badge.short_description = 'Status'
