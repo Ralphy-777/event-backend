@@ -1,4 +1,4 @@
-"""Email helpers for EventPro — sends via Nodemailer bridge (Next.js) with Django SMTP fallback."""
+"""Email helpers for EventPro — sends via Django SMTP with Nodemailer bridge fallback."""
 import threading
 import logging
 import requests as http_requests
@@ -8,33 +8,8 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 
-def _send_via_bridge(subject, html_body, recipient, plain_text):
-    """Try sending via Nodemailer bridge first, fallback to Django SMTP."""
-    bridge_url = getattr(settings, 'EMAIL_BRIDGE_URL', '').rstrip('/')
-    bridge_secret = getattr(settings, 'EMAIL_BRIDGE_SECRET', '')
-
-    if bridge_url and bridge_secret:
-        try:
-            resp = http_requests.post(
-                f'{bridge_url}/api/send-email',
-                json={
-                    'recipient': recipient,
-                    'subject': subject,
-                    'htmlBody': html_body,
-                    'textBody': plain_text,
-                },
-                headers={'x-email-bridge-secret': bridge_secret},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                logger.info('Email sent via bridge to %s', recipient)
-                return True
-            else:
-                logger.warning('Bridge failed (%s): %s', resp.status_code, resp.text)
-        except Exception as e:
-            logger.warning('Bridge error: %s — falling back to SMTP', e)
-
-    # Fallback: Django SMTP
+def _send_via_smtp(subject, html_body, recipient, plain_text):
+    """Send via Django SMTP."""
     try:
         from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'EventPro <noreply@eventpro.com>')
         msg = EmailMultiAlternatives(subject, plain_text, from_email, [recipient])
@@ -43,17 +18,47 @@ def _send_via_bridge(subject, html_body, recipient, plain_text):
         logger.info('Email sent via SMTP to %s', recipient)
         return True
     except Exception as e:
-        logger.error('SMTP fallback also failed to %s: %s', recipient, e)
+        logger.error('SMTP failed to %s: %s', recipient, e)
+        return False
+
+
+def _send_via_bridge(subject, html_body, recipient, plain_text):
+    """Send via Nodemailer bridge (Next.js API)."""
+    bridge_url = getattr(settings, 'EMAIL_BRIDGE_URL', '').rstrip('/')
+    bridge_secret = getattr(settings, 'EMAIL_BRIDGE_SECRET', '')
+    if not bridge_url or not bridge_secret:
+        return False
+    try:
+        resp = http_requests.post(
+            f'{bridge_url}/api/send-email',
+            json={
+                'recipient': recipient,
+                'subject': subject,
+                'htmlBody': html_body,
+                'textBody': plain_text,
+            },
+            headers={'x-email-bridge-secret': bridge_secret},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            logger.info('Email sent via bridge to %s', recipient)
+            return True
+        logger.warning('Bridge failed (%s): %s', resp.status_code, resp.text)
+        return False
+    except Exception as e:
+        logger.warning('Bridge error for %s: %s', recipient, e)
         return False
 
 
 def send_html_email(subject, html_body, recipient_list, plain_text=None, sync=False):
-    """Send HTML email — always async unless sync=True."""
+    """Send HTML email — tries SMTP first, then bridge as fallback."""
     plain = plain_text or 'Please view this email in an HTML-capable client.'
 
     def _send_all():
         for recipient in recipient_list:
-            _send_via_bridge(subject, html_body, recipient, plain)
+            sent = _send_via_smtp(subject, html_body, recipient, plain)
+            if not sent:
+                _send_via_bridge(subject, html_body, recipient, plain)
 
     if sync:
         _send_all()
