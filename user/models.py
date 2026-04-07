@@ -176,3 +176,4 @@ class ContactMessage(models.Model):
 
     def __str__(self):
         return f"{self.name} \u2014 {self.subject}"
+

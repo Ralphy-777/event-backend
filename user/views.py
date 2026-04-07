@@ -510,21 +510,30 @@ def get_public_events(request):
 @permission_classes([IsAuthenticated])
 def get_bookings(request):
     bookings = Booking.objects.all()
-    data = [{
-        'id': b.id,
-        'user': f"{b.user.first_name} {b.user.last_name}",
-        'event_type': b.event_type,
-        'capacity': b.capacity,
-        'date': b.date,
-        'time': b.time,
-        'status': b.status,
-        'payment_status': b.payment_status,
-        'gcash_reference': b.gcash_reference or '',
-        'payment_proof': request.build_absolute_uri(b.payment_proof.url) if b.payment_proof else None,
-        'payment_method': b.payment_method,
-        'total_amount': float(b.total_amount),
-        'decline_reason': b.decline_reason or '',
-    } for b in bookings]
+    data = []
+    for b in bookings:
+        proof_url = None
+        if b.payment_proof:
+            try:
+                url = b.payment_proof.url
+                proof_url = url if url.startswith('http') else request.build_absolute_uri(url)
+            except Exception:
+                proof_url = str(b.payment_proof)
+        data.append({
+            'id': b.id,
+            'user': f"{b.user.first_name} {b.user.last_name}",
+            'event_type': b.event_type,
+            'capacity': b.capacity,
+            'date': b.date,
+            'time': b.time,
+            'status': b.status,
+            'payment_status': b.payment_status,
+            'gcash_reference': b.gcash_reference or '',
+            'payment_proof': proof_url,
+            'payment_method': b.payment_method,
+            'total_amount': float(b.total_amount),
+            'decline_reason': b.decline_reason or '',
+        })
     return Response(data)
 
 @api_view(['GET'])

@@ -271,3 +271,5 @@ class ContactMessageAdmin(admin.ModelAdmin):
     def replied_badge(self, obj):
         return _badge('Replied', '#10b981') if obj.reply else _badge('Pending', '#94a3b8')
     replied_badge.short_description = 'Reply'
+
+
