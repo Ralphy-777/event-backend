@@ -238,7 +238,7 @@ _CLOUDINARY_URL = os.environ.get('CLOUDINARY_URL', '')
 if _CLOUDINARY_URL:
     import cloudinary
     cloudinary.config(cloudinary_url=_CLOUDINARY_URL)
-    INSTALLED_APPS = ['cloudinary_storage', 'cloudinary'] + INSTALLED_APPS
+    INSTALLED_APPS = INSTALLED_APPS + ['cloudinary_storage', 'cloudinary']
     STORAGES['default'] = {
         'BACKEND': 'cloudinary_storage.storage.MediaCloudinaryStorage',
     }
