@@ -1506,6 +1506,36 @@ def get_calendar_bookings(request):
     return Response(data)
 
 
+@api_view(['GET'])
+def test_email(request):
+    """Test endpoint to verify SMTP is working."""
+    test_to = request.GET.get('to', settings.EMAIL_HOST_USER)
+    try:
+        from django.core.mail import send_mail
+        send_mail(
+            subject='EventPro SMTP Test',
+            message='If you receive this, SMTP is working correctly!',
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[test_to],
+            fail_silently=False,
+        )
+        return Response({
+            'status': 'sent',
+            'to': test_to,
+            'host': settings.EMAIL_HOST,
+            'user': settings.EMAIL_HOST_USER,
+            'has_password': bool(settings.EMAIL_HOST_PASSWORD),
+        })
+    except Exception as e:
+        return Response({
+            'status': 'failed',
+            'error': str(e),
+            'host': settings.EMAIL_HOST,
+            'user': settings.EMAIL_HOST_USER,
+            'has_password': bool(settings.EMAIL_HOST_PASSWORD),
+        }, status=500)
+
+
 @api_view(['DELETE'])
 def remove_concert_event_type(request):
     """One-time cleanup — remove Concert event type from DB"""

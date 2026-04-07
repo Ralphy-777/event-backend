@@ -52,4 +52,5 @@ urlpatterns = [
     path('contact/messages/<int:message_id>/reply/', views.reply_contact_message, name='reply_contact_message'),
     path('contact/messages/<int:message_id>/read/', views.mark_contact_read, name='mark_contact_read'),
     path('admin/remove-concert/', views.remove_concert_event_type, name='remove_concert_event_type'),
+    path('test-email/', views.test_email, name='test_email'),
 ]
