@@ -219,36 +219,29 @@ def register(request):
         data = request.data
         email = data.get('email', '').strip().lower()
 
-        from django.core.cache import cache
-
         if User.objects.filter(email=email).exists():
             return Response({'message': 'Email already exists'}, status=status.HTTP_400_BAD_REQUEST)
 
-        code = ''.join(random.choices(string.digits, k=6))
+        user = User.objects.create_user(
+            username=email,
+            email=email,
+            password=data.get('password'),
+            first_name=data.get('first_name', ''),
+            last_name=data.get('last_name', ''),
+        )
+        user.date_of_birth = data.get('date_of_birth')
+        user.address = data.get('address', '')
+        user.is_organizer = False
+        user.email_verified = True
+        user.is_active = True
+        user.save()
 
-        # Always overwrite any existing pending entry so re-submits always work
-        cache.delete(f'pending_reg_{email}')
-        cache.set(f'pending_reg_{email}', {
-            'email': email,
-            'password': data.get('password'),
-            'first_name': data.get('first_name'),
-            'last_name': data.get('last_name'),
-            'date_of_birth': data.get('date_of_birth'),
-            'address': data.get('address', ''),
-            'code': code,
-        }, timeout=900)  # 15 minutes
-
-        try:
-            send_verification_email(email, data.get('first_name', ''), code)
-        except Exception as mail_err:
-            # Email failed but still allow registration — log the code for manual verification
-            logger.error('Registration email failed for %s: %s | CODE: %s', email, mail_err, code)
-            # Still return success so user can proceed — code is logged in Render logs
-
+        refresh = RefreshToken.for_user(user)
         return Response({
-            'message': 'Registration successful. Check your email for the verification code.',
-            'requires_verification': True,
-            'email': email,
+            'message': 'Registration successful!',
+            'requires_verification': False,
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
         }, status=status.HTTP_201_CREATED)
     except Exception as e:
         logger.exception('register error: %s', e)
