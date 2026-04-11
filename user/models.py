@@ -82,6 +82,7 @@ class Booking(models.Model):
     cancel_reason = models.TextField(blank=True, default='')
     special_requests = models.TextField(blank=True, null=True, default='')
     payment_deadline = models.DateTimeField(null=True, blank=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -99,6 +100,42 @@ class Booking(models.Model):
         if self.time_slot == 'whole_day' or self.whole_day:
             return round(base * 2 * Decimal('0.8'), 2)
         return base
+
+
+class BookingStatusHistory(models.Model):
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='status_history')
+    from_status = models.CharField(max_length=40, blank=True, default='')
+    to_status = models.CharField(max_length=40)
+    reason = models.TextField(blank=True, default='')
+    actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='booking_status_actions')
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+        verbose_name = 'Booking Status History'
+        verbose_name_plural = 'Booking Status Histories'
+
+    def __str__(self):
+        return f'Booking #{self.booking_id}: {self.from_status or "start"} -> {self.to_status}'
+
+
+class EmailDeliveryLog(models.Model):
+    channel = models.CharField(max_length=30, default='bridge')
+    recipient = models.EmailField()
+    subject = models.CharField(max_length=255)
+    status = models.CharField(max_length=20, choices=[('pending', 'Pending'), ('sent', 'Sent'), ('failed', 'Failed')], default='pending')
+    error_message = models.TextField(blank=True, default='')
+    provider_message_id = models.CharField(max_length=255, blank=True, default='')
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.recipient} - {self.subject} ({self.status})'
 
 
 class Payment(models.Model):
@@ -176,4 +213,3 @@ class ContactMessage(models.Model):
 
     def __str__(self):
         return f"{self.name} \u2014 {self.subject}"
-

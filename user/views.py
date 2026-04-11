@@ -4,11 +4,10 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import Booking, Payment, EventType, Review, ReviewReply, Notification, ContactMessage
+from .models import Booking, Payment, EventType, Review, ReviewReply, Notification, ContactMessage, BookingStatusHistory
 from datetime import datetime, date as date_type, timedelta
-from django.core.mail import send_mail
 from django.conf import settings
-from .email_utils import (
+from .mailer import (
     send_verification_email, send_password_reset_email, send_email_change_verification,
     send_booking_confirmation_email, send_booking_status_email, send_guest_invitation_email,
     send_cancellation_email, send_payment_confirmed_email, send_html_email,
@@ -16,17 +15,170 @@ from .email_utils import (
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.views.decorators.csrf import csrf_exempt
+from django.db.models import Q
+from django.db.utils import OperationalError, ProgrammingError
 import logging
 import uuid
 import json
 import random
 import string
 import threading
+import sys
 
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
+
+DECLINE_REASON_TEMPLATES = [
+    {'key': 'slot_unavailable', 'label': 'Slot unavailable', 'text': 'The selected date or time slot is no longer available.'},
+    {'key': 'capacity_limit', 'label': 'Capacity limit', 'text': 'The requested guest count exceeds the venue capacity for this event.'},
+    {'key': 'incomplete_details', 'label': 'Incomplete details', 'text': 'The booking details submitted are incomplete and need clarification.'},
+    {'key': 'payment_issue', 'label': 'Payment issue', 'text': 'We could not verify the payment requirement for this booking.'},
+]
+
+CANCEL_REASON_TEMPLATES = [
+    {'key': 'change_of_plans', 'label': 'Change of plans', 'text': 'The client requested cancellation due to a change of plans.'},
+    {'key': 'budget_constraints', 'label': 'Budget constraints', 'text': 'The booking was cancelled due to budget constraints.'},
+    {'key': 'schedule_conflict', 'label': 'Schedule conflict', 'text': 'The booking was cancelled because of a schedule conflict.'},
+    {'key': 'duplicate_request', 'label': 'Duplicate request', 'text': 'The booking was cancelled because a duplicate request already exists.'},
+]
+
+
+def _serialize_status_history_entry(entry):
+    return {
+        'id': entry.id,
+        'from_status': entry.from_status,
+        'to_status': entry.to_status,
+        'reason': entry.reason,
+        'actor': entry.actor.email if entry.actor else None,
+        'metadata': entry.metadata,
+        'created_at': entry.created_at.isoformat(),
+    }
+
+
+def _booking_status_history(booking):
+    return [_serialize_status_history_entry(entry) for entry in booking.status_history.all()]
+
+
+def _record_booking_history(booking, to_status, actor=None, reason='', metadata=None, from_status=''):
+    BookingStatusHistory.objects.create(
+        booking=booking,
+        from_status=from_status,
+        to_status=to_status,
+        actor=actor,
+        reason=reason,
+        metadata=metadata or {},
+    )
+
+
+def _template_reason(template_key, custom_reason, templates):
+    custom_reason = (custom_reason or '').strip()
+    if custom_reason:
+        return custom_reason
+    for template in templates:
+        if template['key'] == template_key:
+            return template['text']
+    return ''
+
+
+def _normalize_invited_emails(raw_value, owner_email):
+    raw_value = raw_value or ''
+    candidate_emails = [part.strip().lower() for part in raw_value.replace(';', ',').split(',') if part.strip()]
+    normalized = []
+    seen = set()
+    invalid = []
+    for email in candidate_emails:
+        if email in seen:
+            continue
+        try:
+            validate_email(email)
+        except ValidationError:
+            invalid.append(email)
+            continue
+        if email == owner_email.lower():
+            invalid.append(email)
+            continue
+        seen.add(email)
+        normalized.append(email)
+    return normalized, invalid
+
+
+def _active_booking_queryset():
+    return Booking.objects.exclude(status__in=['declined', 'cancelled'])
+
+
+def _duplicate_booking_queryset(user, booking_date, time_slot, booking_time=None, exclude_booking_id=None):
+    queryset = _active_booking_queryset().filter(user=user, date=booking_date, time_slot=time_slot)
+    if time_slot != 'whole_day' and booking_time:
+        queryset = queryset.filter(time=booking_time)
+    if exclude_booking_id:
+        queryset = queryset.exclude(id=exclude_booking_id)
+    return queryset
+
+
+def _get_recent_acceptance_block(user):
+    try:
+        latest_confirmed_booking = (
+            Booking.objects.filter(user=user, status='confirmed', accepted_at__isnull=False)
+            .order_by('-accepted_at')
+            .first()
+        )
+    except (ProgrammingError, OperationalError):
+        return None
+
+    if not latest_confirmed_booking:
+        return None
+
+    unlock_at = latest_confirmed_booking.accepted_at + timedelta(hours=24)
+    if timezone.now() >= unlock_at:
+        return None
+
+    return {
+        'booking': latest_confirmed_booking,
+        'accepted_at': latest_confirmed_booking.accepted_at,
+        'unlock_at': unlock_at,
+        'remaining': unlock_at - timezone.now(),
+    }
+
+
+def _conflict_summary(booking_date, time_slot, booking_time=None, exclude_booking_id=None):
+    active = _active_booking_queryset().filter(date=booking_date)
+    if exclude_booking_id:
+        active = active.exclude(id=exclude_booking_id)
+
+    whole_day_booked = active.filter(time_slot='whole_day').count()
+    morning_used = active.filter(time_slot='morning').count() + whole_day_booked
+    afternoon_used = active.filter(time_slot='afternoon').count() + whole_day_booked
+    warnings = []
+
+    if whole_day_booked:
+        warnings.append('A whole-day booking already exists on this date and reduces slot availability.')
+    if morning_used >= 4:
+        warnings.append('Morning slots are nearly full for this date.')
+    if afternoon_used >= 4:
+        warnings.append('Afternoon slots are nearly full for this date.')
+
+    return {
+        'morning_booked': morning_used,
+        'afternoon_booked': afternoon_used,
+        'whole_day_booked': whole_day_booked,
+        'requested_slot': time_slot,
+        'requested_time': str(booking_time) if booking_time else None,
+        'warnings': warnings,
+    }
+
+
+def _throttle_email_action(scope, identifier, limit, window_seconds):
+    from django.core.cache import cache
+
+    key = f'throttle:{scope}:{identifier}'
+    attempts = cache.get(key, 0)
+    if attempts >= limit:
+        return False
+    cache.set(key, attempts + 1, timeout=window_seconds)
+    return True
 
 
 def send_mail_async(subject, message, recipient_list):
@@ -141,14 +293,40 @@ def _start_deadline_checker():
             time.sleep(3600)
     threading.Thread(target=_run, daemon=True).start()
 
+
+def _should_start_background_workers():
+    management_commands_to_skip = {
+        'migrate',
+        'makemigrations',
+        'showmigrations',
+        'collectstatic',
+        'shell',
+        'dbshell',
+        'test',
+        'check',
+    }
+    return not any(command in sys.argv for command in management_commands_to_skip)
+
 def _check_payment_deadlines():
     from django.utils import timezone
     now = timezone.now()
-    overdue = Booking.objects.filter(
-        status='pending',
-        payment_status__in=['pending', 'rejected'],
-        payment_deadline__lt=now,
-    )
+    try:
+        overdue = Booking.objects.only(
+            'id',
+            'user',
+            'event_type',
+            'date',
+            'status',
+            'payment_status',
+            'payment_deadline',
+            'decline_reason',
+        ).filter(
+            status='pending',
+            payment_status__in=['pending', 'rejected'],
+            payment_deadline__lt=now,
+        )
+    except (ProgrammingError, OperationalError):
+        return
     for booking in overdue:
         booking.status = 'declined'
         booking.decline_reason = 'Auto-declined: payment deadline passed (3 days).'
@@ -172,19 +350,30 @@ def _check_payment_deadlines():
             plain_text=f'Hi {booking.user.first_name},\n\nYour {booking.event_type} booking on {booking.date} was auto-declined due to missed payment deadline.\n\n— EventPro Team',
         )
 
-_start_deadline_checker()
+if _should_start_background_workers():
+    _start_deadline_checker()
 
 
 def _send_invitation_emails(booking, confirmed=False):
     """Send HTML invitation emails to all guests listed in invited_emails."""
     if not booking.invited_emails:
-        return
-    emails = [e.strip() for e in booking.invited_emails.replace(';', ',').split(',') if e.strip()]
+        return {'sent': [], 'failed': [], 'invalid': []}
+    emails, invalid_emails = _normalize_invited_emails(booking.invited_emails, booking.user.email)
     if not emails:
-        return
+        if invalid_emails:
+            logger.warning('Skipping invalid guest invitation emails for booking %s: %s', booking.id, invalid_emails)
+        return {'sent': [], 'failed': [], 'invalid': invalid_emails}
     host_name = f'{booking.user.first_name} {booking.user.last_name}'
+    sent = []
+    failed = []
     for email in emails:
-        send_guest_invitation_email(email, host_name, booking, confirmed=confirmed)
+        try:
+            send_guest_invitation_email(email, host_name, booking, confirmed=confirmed)
+            sent.append(email)
+        except Exception as exc:
+            logger.warning('Guest invitation email failed for %s on booking %s: %s', email, booking.id, exc)
+            failed.append({'email': email, 'error': str(exc)})
+    return {'sent': sent, 'failed': failed, 'invalid': invalid_emails}
 
 
 
@@ -194,13 +383,13 @@ def get_event_types(request):
     data = []
     for et in event_types:
         image = None
-        if et.image_url:
-            image = et.image_url
-        elif et.image:
+        if et.image:
             try:
                 image = request.build_absolute_uri(et.image.url)
             except Exception:
                 image = None
+        elif et.image_url:
+            image = et.image_url
         data.append({
             'id': et.id,
             'event_type': et.event_type,
@@ -213,35 +402,65 @@ def get_event_types(request):
         })
     return Response(data)
 
+
+@api_view(['GET'])
+def get_public_stats(request):
+    total_bookings = Booking.objects.count()
+    active_event_types = EventType.objects.filter(is_active=True).count()
+    reviews = Review.objects.all()
+    review_count = reviews.count()
+    average_rating = round(sum(review.rating for review in reviews) / review_count, 1) if review_count > 0 else 0.0
+    satisfaction_rate = round((average_rating / 5) * 100) if review_count > 0 else 0
+
+    return Response({
+        'events_hosted': total_bookings,
+        'average_rating': average_rating,
+        'event_types': active_event_types,
+        'satisfaction_rate': satisfaction_rate,
+    })
+
 @api_view(['POST'])
 def register(request):
     try:
+        from django.core.cache import cache
+
         data = request.data
         email = data.get('email', '').strip().lower()
+        password = data.get('password')
+        first_name = data.get('first_name', '').strip()
+        last_name = data.get('last_name', '').strip()
 
         if User.objects.filter(email=email).exists():
             return Response({'message': 'Email already exists'}, status=status.HTTP_400_BAD_REQUEST)
 
-        user = User.objects.create_user(
-            username=email,
-            email=email,
-            password=data.get('password'),
-            first_name=data.get('first_name', ''),
-            last_name=data.get('last_name', ''),
-        )
-        user.date_of_birth = data.get('date_of_birth')
-        user.address = data.get('address', '')
-        user.is_organizer = False
-        user.email_verified = True
-        user.is_active = True
-        user.save()
+        if not email or not password or not first_name or not last_name:
+            return Response({'message': 'First name, last name, email, and password are required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        refresh = RefreshToken.for_user(user)
+        if not _throttle_email_action('register', email or request.META.get('REMOTE_ADDR', 'unknown'), 5, 900):
+            return Response({'message': 'Too many registration attempts. Please wait 15 minutes.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        code = ''.join(random.choices(string.digits, k=6))
+        pending = {
+            'email': email,
+            'password': password,
+            'first_name': first_name,
+            'last_name': last_name,
+            'date_of_birth': data.get('date_of_birth'),
+            'address': data.get('address', '').strip(),
+            'code': code,
+        }
+        cache.set(f'pending_reg_{email}', pending, timeout=900)
+
+        try:
+            send_verification_email(email, first_name, code)
+        except Exception:
+            cache.delete(f'pending_reg_{email}')
+            raise
+
         return Response({
-            'message': 'Registration successful!',
-            'requires_verification': False,
-            'access': str(refresh.access_token),
-            'refresh': str(refresh),
+            'message': 'Verification code sent to your email.',
+            'requires_verification': True,
+            'email': email,
         }, status=status.HTTP_201_CREATED)
     except Exception as e:
         logger.exception('register error: %s', e)
@@ -257,6 +476,8 @@ def request_email_change(request):
         return Response({'message': 'New email is required'}, status=status.HTTP_400_BAD_REQUEST)
     if User.objects.filter(email=new_email).exists():
         return Response({'message': 'This email is already in use'}, status=status.HTTP_400_BAD_REQUEST)
+    if not _throttle_email_action('email_change', str(request.user.id), 5, 600):
+        return Response({'message': 'Too many email change requests. Please wait 10 minutes.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
     code = ''.join(random.choices(string.digits, k=6))
     cache.set(f'email_change_{request.user.id}', {'new_email': new_email, 'code': code}, timeout=600)
     send_email_change_verification(request.user.email, request.user.first_name, new_email, code)
@@ -284,7 +505,9 @@ def verify_email_change(request):
 
 @api_view(['POST'])
 def forgot_password(request):
-    email = request.data.get('email')
+    email = (request.data.get('email') or '').strip().lower()
+    if not _throttle_email_action('forgot_password', email or request.META.get('REMOTE_ADDR', 'unknown'), 5, 900):
+        return Response({'message': 'Too many reset requests. Please wait 15 minutes.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
     try:
         user = User.objects.get(email=email, is_active=True)
     except User.DoesNotExist:
@@ -337,6 +560,8 @@ def get_verification_code_debug(request):
 def resend_verification_code(request):
     from django.core.cache import cache
     email = request.data.get('email', '').strip().lower()
+    if not _throttle_email_action('resend_verification', email or request.META.get('REMOTE_ADDR', 'unknown'), 5, 900):
+        return Response({'message': 'Too many resend attempts. Please wait 15 minutes.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
     pending = cache.get(f'pending_reg_{email}')
     if not pending:
         return Response({'message': 'No pending verification found for this email.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -453,12 +678,30 @@ def check_availability(request):
     if not date:
         return Response({'error': 'Date is required'}, status=status.HTTP_400_BAD_REQUEST)
 
+    requested_slot = request.GET.get('time_slot', 'morning')
+    if requested_slot not in ['morning', 'afternoon', 'whole_day']:
+        requested_slot = 'morning'
+
     MAX_SLOTS = 5
-    active = Booking.objects.filter(date=date).exclude(status='declined')
+    active = _active_booking_queryset().filter(date=date)
 
     whole_day_count = active.filter(time_slot='whole_day').count()
     morning_count = active.filter(time_slot='morning').count() + whole_day_count
     afternoon_count = active.filter(time_slot='afternoon').count() + whole_day_count
+
+    conflict_summary = _conflict_summary(date, requested_slot)
+    duplicate_info = None
+    if request.user and request.user.is_authenticated:
+        duplicate = _duplicate_booking_queryset(request.user, date, requested_slot).order_by('-created_at').first()
+        if duplicate:
+            duplicate_info = {
+                'booking_id': duplicate.id,
+                'status': duplicate.status,
+                'payment_status': duplicate.payment_status,
+                'date': str(duplicate.date),
+                'time': str(duplicate.time) if duplicate.time else None,
+                'time_slot': duplicate.time_slot,
+            }
 
     return Response({
         'total_slots': MAX_SLOTS,
@@ -473,6 +716,14 @@ def check_availability(request):
         # legacy field kept for backward compat
         'available_rooms': max(0, MAX_SLOTS - active.count()),
         'booked_rooms': active.count(),
+        'warnings': conflict_summary['warnings'],
+        'conflicts': {
+            'requested_slot': requested_slot,
+            'whole_day_booked': whole_day_count,
+            'morning_nearly_full': morning_count >= 4,
+            'afternoon_nearly_full': afternoon_count >= 4,
+        },
+        'duplicate_booking': duplicate_info,
     })
 
 @api_view(['GET'])
@@ -499,10 +750,19 @@ def get_public_events(request):
     
     return Response(data)
 
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_booking_reason_templates(request):
+    return Response({
+        'decline_reasons': DECLINE_REASON_TEMPLATES,
+        'cancel_reasons': CANCEL_REASON_TEMPLATES,
+    })
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_bookings(request):
-    bookings = Booking.objects.all()
+    bookings = Booking.objects.all().prefetch_related('status_history')
     data = []
     for b in bookings:
         proof_url = None
@@ -526,6 +786,8 @@ def get_bookings(request):
             'payment_method': b.payment_method,
             'total_amount': float(b.total_amount),
             'decline_reason': b.decline_reason or '',
+            'cancel_reason': b.cancel_reason or '',
+            'status_history': _booking_status_history(b),
         })
     return Response(data)
 
@@ -533,7 +795,7 @@ def get_bookings(request):
 @permission_classes([IsAuthenticated])
 def get_my_bookings(request):
     try:
-        bookings = Booking.objects.filter(user=request.user)
+        bookings = Booking.objects.filter(user=request.user).prefetch_related('status_history')
         data = []
         for b in bookings:
             booking_data = {
@@ -556,6 +818,8 @@ def get_my_bookings(request):
                 'whole_day': b.whole_day,
                 'special_requests': b.special_requests,
                 'decline_reason': b.decline_reason or '',
+                'cancel_reason': b.cancel_reason or '',
+                'status_history': _booking_status_history(b),
                 'has_review': b.reviews.filter(user=request.user).exists(),
             }
             data.append(booking_data)
@@ -570,6 +834,23 @@ def create_booking(request):
     try:
         if request.user.is_organizer:
             return Response({'message': 'Organizers cannot create bookings'}, status=status.HTTP_403_FORBIDDEN)
+
+        acceptance_block = _get_recent_acceptance_block(request.user)
+        if acceptance_block:
+            return Response(
+                {
+                    'message': (
+                        'You cannot create another booking yet. '
+                        f'Your last accepted booking was confirmed on '
+                        f"{timezone.localtime(acceptance_block['accepted_at']).strftime('%B %d, %Y %I:%M %p')} "
+                        f'and you can book again after '
+                        f"{timezone.localtime(acceptance_block['unlock_at']).strftime('%B %d, %Y %I:%M %p')}."
+                    ),
+                    'lock_until': acceptance_block['unlock_at'].isoformat(),
+                    'accepted_booking_id': acceptance_block['booking'].id,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         data = request.data
         date = data.get('date')
@@ -587,12 +868,31 @@ def create_booking(request):
         if not payment_method:
             return Response({'message': 'Payment method is required'}, status=status.HTTP_400_BAD_REQUEST)
 
+        if not date:
+            return Response({'message': 'Event date is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            booking_date = datetime.strptime(date, '%Y-%m-%d').date()
+        except (TypeError, ValueError):
+            return Response({'message': 'Invalid event date'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if booking_date < timezone.localdate():
+            return Response({'message': 'You cannot create a booking for a past date'}, status=status.HTTP_400_BAD_REQUEST)
+
+        normalized_emails, invalid_emails = _normalize_invited_emails(invited_emails, request.user.email)
+        if invalid_emails:
+            return Response(
+                {'message': f'Invalid guest email(s): {", ".join(invalid_emails)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        invited_emails = ', '.join(normalized_emails)
+
         # Validate invited emails count against event type max
         if invited_emails:
-            email_list = [e.strip() for e in invited_emails.replace(';', ',').split(',') if e.strip()]
             try:
                 et_obj_check = EventType.objects.get(event_type=event_type, is_active=True)
-                if len(email_list) > et_obj_check.max_invited_emails:
+                if len(normalized_emails) > et_obj_check.max_invited_emails:
                     return Response(
                         {'message': f'You can only invite up to {et_obj_check.max_invited_emails} guests by email for {event_type}.'},
                         status=status.HTTP_400_BAD_REQUEST
@@ -609,8 +909,30 @@ def create_booking(request):
         else:
             time_slot = 'morning'  # safe default
 
+        duplicate_booking = _duplicate_booking_queryset(
+            request.user,
+            date,
+            time_slot,
+            booking_time=data.get('time') if time_slot != 'whole_day' else None,
+        ).order_by('-created_at').first()
+        if duplicate_booking:
+            return Response(
+                {
+                    'message': 'You already have a booking request for the same date and time slot.',
+                    'duplicate_booking': {
+                        'booking_id': duplicate_booking.id,
+                        'status': duplicate_booking.status,
+                        'payment_status': duplicate_booking.payment_status,
+                        'date': str(duplicate_booking.date),
+                        'time': str(duplicate_booking.time) if duplicate_booking.time else None,
+                        'time_slot': duplicate_booking.time_slot,
+                    },
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         MAX_SLOTS = 5
-        active = Booking.objects.filter(date=date).exclude(status='declined')
+        active = _active_booking_queryset().filter(date=date)
         whole_day_booked = active.filter(time_slot='whole_day').count()
 
         if time_slot == 'whole_day':
@@ -659,6 +981,12 @@ def create_booking(request):
         booking.total_amount = booking.calculate_amount()
         booking.save()
         booking.refresh_from_db()  # ensure date/time are proper Python objects
+        _record_booking_history(
+            booking,
+            to_status='pending',
+            actor=request.user,
+            metadata={'payment_method': payment_method, 'time_slot': booking.time_slot, 'invited_email_count': len(normalized_emails)},
+        )
 
         # Notify all organizers about the new booking via WebSocket
         organizers = User.objects.filter(is_organizer=True, is_active=True)
@@ -671,22 +999,40 @@ def create_booking(request):
         send_booking_confirmation_email(request.user.email, request.user.first_name, booking)
 
         # Send invitation emails to guests
-        _send_invitation_emails(booking, confirmed=False)
+        invitation_result = _send_invitation_emails(booking, confirmed=False)
 
         # Handle payment based on method
         if payment_method == 'GCash':
             booking.payment_status = 'pending'
             booking.save()
+            _record_booking_history(
+                booking,
+                from_status='pending',
+                to_status='payment_submitted',
+                actor=request.user,
+                reason='GCash payment selected.',
+                metadata={'payment_status': booking.payment_status},
+            )
             return Response({
                 'message': 'Booking created successfully',
                 'booking_id': booking.id,
                 'total_amount': float(booking.total_amount),
                 'payment_method': 'GCash',
-                'requires_payment': True
+                'requires_payment': True,
+                'warnings': _conflict_summary(date, time_slot, booking.time)['warnings'],
+                'invitation_status': invitation_result,
             }, status=status.HTTP_201_CREATED)
         else:
             booking.payment_status = 'paid'
             booking.save()
+            _record_booking_history(
+                booking,
+                from_status='pending',
+                to_status='payment_submitted',
+                actor=request.user,
+                reason='Booking marked as paid at creation.',
+                metadata={'payment_status': booking.payment_status, 'payment_method': payment_method},
+            )
             reference_number = f"PAY-{uuid.uuid4().hex[:12].upper()}"
             client_name = f"{request.user.first_name} {request.user.last_name}"
             Payment.objects.create(
@@ -703,7 +1049,9 @@ def create_booking(request):
                 'booking_id': booking.id,
                 'total_amount': float(booking.total_amount),
                 'reference_number': reference_number,
-                'requires_payment': False
+                'requires_payment': False,
+                'warnings': _conflict_summary(date, time_slot, booking.time)['warnings'],
+                'invitation_status': invitation_result,
             }, status=status.HTTP_201_CREATED)
     except Exception as e:
         logger.exception('create_booking error: %s', e)
@@ -718,7 +1066,11 @@ def update_booking_status(request, booking_id):
     try:
         booking = Booking.objects.get(id=booking_id)
         new_status = request.data.get('status')
-        decline_reason = request.data.get('decline_reason', '').strip()
+        decline_reason = _template_reason(
+            request.data.get('reason_template', '').strip(),
+            request.data.get('decline_reason', '').strip(),
+            DECLINE_REASON_TEMPLATES,
+        )
         
         if new_status not in ['confirmed', 'declined']:
             return Response({'message': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
@@ -726,10 +1078,21 @@ def update_booking_status(request, booking_id):
         if new_status == 'declined' and not decline_reason:
             return Response({'message': 'Please provide a reason for declining.'}, status=status.HTTP_400_BAD_REQUEST)
         
+        previous_status = booking.status
         booking.status = new_status
+        if new_status == 'confirmed' and previous_status != 'confirmed':
+            booking.accepted_at = timezone.now()
         if new_status == 'declined':
             booking.decline_reason = decline_reason
         booking.save()
+        _record_booking_history(
+            booking,
+            from_status=previous_status,
+            to_status=new_status,
+            actor=request.user,
+            reason=decline_reason if new_status == 'declined' else 'Booking confirmed by organizer.',
+            metadata={'payment_status': booking.payment_status},
+        )
 
         # Create in-app notification for the client
         if new_status == 'confirmed':
@@ -744,7 +1107,11 @@ def update_booking_status(request, booking_id):
         # Send confirmation email to client (async - non-blocking)
         if new_status == 'confirmed':
             send_booking_status_email(booking.user.email, booking.user.first_name, booking, 'confirmed')
-            _send_invitation_emails(booking, confirmed=True)
+            invitation_result = _send_invitation_emails(booking, confirmed=True)
+            return Response({
+                'message': f'Booking {new_status} successfully',
+                'invitation_status': invitation_result,
+            })
         elif new_status == 'declined':
             send_booking_status_email(booking.user.email, booking.user.first_name, booking, 'declined', decline_reason)
 
@@ -793,13 +1160,27 @@ def cancel_booking(request, booking_id):
             return Response({'message': 'Cannot cancel confirmed bookings. Please contact organizer.'}, status=status.HTTP_400_BAD_REQUEST)
 
         cancel_reason = request.data.get('reason', '').strip() if request.data else ''
+        cancel_reason = _template_reason(
+            request.data.get('reason_template', '').strip() if request.data else '',
+            cancel_reason,
+            CANCEL_REASON_TEMPLATES,
+        )
         event_type = booking.event_type
         date = booking.date
 
-        booking.status = 'declined'
+        previous_status = booking.status
+        booking.status = 'cancelled'
         booking.cancel_reason = cancel_reason
         booking.decline_reason = f'Cancelled by client{(": " + cancel_reason) if cancel_reason else "."}'
         booking.save()
+        _record_booking_history(
+            booking,
+            from_status=previous_status,
+            to_status='cancelled',
+            actor=request.user,
+            reason=cancel_reason or 'Booking cancelled by client.',
+            metadata={'payment_status': booking.payment_status},
+        )
 
         # Notify organizers
         organizers = User.objects.filter(is_organizer=True, is_active=True)
@@ -826,19 +1207,53 @@ def update_booking(request, booking_id):
         data = request.data
         new_date = data.get('date')
         new_time = data.get('time')
+        new_time_slot = data.get('time_slot') or booking.time_slot
+        if new_time_slot not in ['morning', 'afternoon', 'whole_day']:
+            new_time_slot = booking.time_slot
+
+        if new_date:
+            try:
+                parsed_new_date = datetime.strptime(str(new_date), '%Y-%m-%d').date()
+            except (TypeError, ValueError):
+                return Response({'message': 'Invalid event date'}, status=status.HTTP_400_BAD_REQUEST)
+            if parsed_new_date < timezone.localdate():
+                return Response({'message': 'You cannot move a booking to a past date'}, status=status.HTTP_400_BAD_REQUEST)
         
         # Check availability for new date if date is changed
         if new_date and new_date != str(booking.date):
-            existing_bookings = Booking.objects.filter(date=new_date).exclude(id=booking_id).count()
+            existing_bookings = _active_booking_queryset().filter(date=new_date).exclude(id=booking_id).count()
             if existing_bookings >= 5:
                 return Response({'message': 'New date is fully booked'}, status=status.HTTP_400_BAD_REQUEST)
             booking.date = new_date
-        
+
+        duplicate_booking = _duplicate_booking_queryset(
+            request.user,
+            new_date or booking.date,
+            new_time_slot,
+            booking_time=new_time or booking.time,
+            exclude_booking_id=booking_id,
+        ).order_by('-created_at').first()
+        if duplicate_booking:
+            return Response(
+                {
+                    'message': 'You already have a booking request for the same date and time slot.',
+                    'duplicate_booking': {
+                        'booking_id': duplicate_booking.id,
+                        'status': duplicate_booking.status,
+                        'payment_status': duplicate_booking.payment_status,
+                    },
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if new_time:
             booking.time = new_time
-        
+        booking.time_slot = new_time_slot
         booking.save()
-        return Response({'message': 'Booking updated successfully'})
+        return Response({
+            'message': 'Booking updated successfully',
+            'warnings': _conflict_summary(booking.date, booking.time_slot, booking.time, exclude_booking_id=booking.id)['warnings'],
+        })
     except Booking.DoesNotExist:
         return Response({'message': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -858,8 +1273,17 @@ def process_payment(request, booking_id):
             return Response({'message': 'Payment method required'}, status=status.HTTP_400_BAD_REQUEST)
         
         # In real implementation, integrate with Stripe/PayPal here
+        previous_payment_status = booking.payment_status
         booking.payment_status = 'paid'
         booking.save()
+        _record_booking_history(
+            booking,
+            from_status=previous_payment_status or booking.status,
+            to_status='payment_confirmed',
+            actor=request.user,
+            reason='Payment processed from the client payment flow.',
+            metadata={'payment_status': booking.payment_status, 'payment_method': payment_method},
+        )
         
         return Response({
             'message': 'Payment successful',
@@ -968,8 +1392,17 @@ def initiate_gcash_payment(request):
         if booking.payment_status == 'paid':
             return Response({'message': 'Booking already paid'}, status=status.HTTP_400_BAD_REQUEST)
         booking.payment_method = 'GCash'
+        previous_payment_status = booking.payment_status
         booking.payment_status = 'pending'
         booking.save()
+        _record_booking_history(
+            booking,
+            from_status=previous_payment_status or booking.status,
+            to_status='payment_submitted',
+            actor=request.user,
+            reason='GCash payment initiated.',
+            metadata={'payment_status': booking.payment_status},
+        )
         return Response({
             'success': True,
             'gcash_number': getattr(settings, 'GCASH_RECEIVER_NUMBER', '09939261681'),
@@ -1032,9 +1465,18 @@ def create_paymongo_gcash(request):
         source = data['data']
         checkout_url = source['attributes']['redirect']['checkout_url']
 
+        previous_payment_status = booking.payment_status
         booking.gcash_reference = source['id']
         booking.payment_status = 'pending'
         booking.save(update_fields=['gcash_reference', 'payment_status'])
+        _record_booking_history(
+            booking,
+            from_status=previous_payment_status or booking.status,
+            to_status='payment_submitted',
+            actor=request.user,
+            reason='PayMongo GCash checkout created.',
+            metadata={'payment_status': booking.payment_status, 'gcash_reference': booking.gcash_reference},
+        )
 
         return Response({'checkout_url': checkout_url, 'source_id': source['id']})
 
@@ -1086,8 +1528,16 @@ def paymongo_webhook(request):
         payment_status = payment['attributes']['status']
 
         if payment_status == 'paid':
+            previous_payment_status = booking.payment_status
             booking.payment_status = 'paid'
             booking.save(update_fields=['payment_status'])
+            _record_booking_history(
+                booking,
+                from_status=previous_payment_status or booking.status,
+                to_status='payment_confirmed',
+                reason='PayMongo webhook marked the payment as paid.',
+                metadata={'payment_status': booking.payment_status},
+            )
             reference_number = payment['id']
             Payment.objects.get_or_create(
                 booking=booking,
@@ -1155,8 +1605,17 @@ def upload_payment_proof(request, booking_id):
                 'error': 'Missing payment_proof fields in database'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
+        previous_payment_status = booking.payment_status
         booking.payment_status = 'pending_verification'
         booking.save()
+        _record_booking_history(
+            booking,
+            from_status=previous_payment_status or booking.status,
+            to_status='payment_submitted',
+            actor=request.user,
+            reason='Payment proof uploaded for organizer verification.',
+            metadata={'payment_status': booking.payment_status, 'gcash_reference': gcash_reference},
+        )
 
         # Notify organizers about payment proof
         organizers = User.objects.filter(is_organizer=True, is_active=True)
@@ -1501,31 +1960,28 @@ def get_calendar_bookings(request):
 
 @api_view(['GET'])
 def test_email(request):
-    """Test endpoint to verify SMTP is working."""
+    """Test endpoint to verify the bridge-backed email flow is working."""
     test_to = request.GET.get('to', settings.EMAIL_HOST_USER)
     try:
-        from django.core.mail import send_mail
-        send_mail(
-            subject='EventPro SMTP Test',
-            message='If you receive this, SMTP is working correctly!',
-            from_email=settings.DEFAULT_FROM_EMAIL,
+        send_html_email(
+            subject='EventPro Email Test',
+            html_body='<p>If you receive this, the EventPro email bridge is working correctly.</p>',
             recipient_list=[test_to],
-            fail_silently=False,
+            plain_text='If you receive this, the EventPro email bridge is working correctly.',
+            sync=True,
         )
         return Response({
             'status': 'sent',
             'to': test_to,
-            'host': settings.EMAIL_HOST,
-            'user': settings.EMAIL_HOST_USER,
-            'has_password': bool(settings.EMAIL_HOST_PASSWORD),
+            'bridge_url': settings.EMAIL_BRIDGE_URL,
+            'has_bridge_secret': bool(settings.EMAIL_BRIDGE_SECRET),
         })
     except Exception as e:
         return Response({
             'status': 'failed',
             'error': str(e),
-            'host': settings.EMAIL_HOST,
-            'user': settings.EMAIL_HOST_USER,
-            'has_password': bool(settings.EMAIL_HOST_PASSWORD),
+            'bridge_url': settings.EMAIL_BRIDGE_URL,
+            'has_bridge_secret': bool(settings.EMAIL_BRIDGE_SECRET),
         }, status=500)
 
 
@@ -1574,8 +2030,17 @@ def verify_payment(request, booking_id):
         action = request.data.get('action')
         
         if action == 'approve':
+            previous_payment_status = booking.payment_status
             booking.payment_status = 'paid'
             booking.save()
+            _record_booking_history(
+                booking,
+                from_status=previous_payment_status or booking.status,
+                to_status='payment_confirmed',
+                actor=request.user,
+                reason='Organizer approved the uploaded payment proof.',
+                metadata={'payment_status': booking.payment_status},
+            )
             
             reference_number = booking.gcash_reference or f"PAY-{uuid.uuid4().hex[:12].upper()}"
             client_name = f"{booking.user.first_name} {booking.user.last_name}"
@@ -1594,8 +2059,17 @@ def verify_payment(request, booking_id):
             
             return Response({'message': 'Payment verified and approved'})
         elif action == 'reject':
+            previous_payment_status = booking.payment_status
             booking.payment_status = 'rejected'
             booking.save()
+            _record_booking_history(
+                booking,
+                from_status=previous_payment_status or booking.status,
+                to_status='payment_rejected',
+                actor=request.user,
+                reason='Organizer rejected the uploaded payment proof.',
+                metadata={'payment_status': booking.payment_status},
+            )
             return Response({'message': 'Payment rejected'})
         else:
             return Response({'message': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)

@@ -1,26 +1,50 @@
 """Email helpers for EventPro — sends via Django SMTP."""
-import threading
 import logging
-from django.core.mail import EmailMultiAlternatives
+import threading
+
+import requests
 from django.conf import settings
+from django.core.mail import EmailMultiAlternatives
 
 logger = logging.getLogger(__name__)
 
 
 def send_html_email(subject, html_body, recipient_list, plain_text=None, sync=False):
-    """Send HTML email via Django SMTP."""
+    """Send HTML email — tries Nodemailer bridge first, falls back to SMTP."""
     plain = plain_text or 'Please view this email in an HTML-capable client.'
-    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'EventPro <noreply@eventpro.com>')
+    bridge_url = getattr(settings, 'EMAIL_BRIDGE_URL', '').rstrip('/')
+    bridge_secret = getattr(settings, 'EMAIL_BRIDGE_SECRET', '')
+
+    def _send_one(recipient):
+        # Try bridge first
+        if bridge_url and bridge_secret:
+            try:
+                import requests as http_req
+                resp = http_req.post(
+                    f'{bridge_url}/api/send-email',
+                    json={'recipient': recipient, 'subject': subject, 'htmlBody': html_body, 'textBody': plain},
+                    headers={'x-email-bridge-secret': bridge_secret},
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    logger.info('Email sent via bridge to %s', recipient)
+                    return
+                logger.warning('Bridge failed (%s) for %s: %s', resp.status_code, recipient, resp.text)
+            except Exception as e:
+                logger.warning('Bridge error for %s: %s', recipient, e)
+        # Fallback: SMTP
+        try:
+            from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'EventPro <noreply@eventpro.com>')
+            msg = EmailMultiAlternatives(subject, plain, from_email, [recipient])
+            msg.attach_alternative(html_body, 'text/html')
+            msg.send()
+            logger.info('Email sent via SMTP to %s', recipient)
+        except Exception as e:
+            logger.error('SMTP also failed to %s: %s', recipient, e)
 
     def _send_all():
         for recipient in recipient_list:
-            try:
-                msg = EmailMultiAlternatives(subject, plain, from_email, [recipient])
-                msg.attach_alternative(html_body, 'text/html')
-                msg.send()
-                logger.info('Email sent via SMTP to %s', recipient)
-            except Exception as e:
-                logger.error('SMTP failed to %s: %s', recipient, e)
+            _send_one(recipient)
 
     if sync:
         _send_all()

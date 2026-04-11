@@ -1,9 +1,10 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
+from django.utils import timezone
 from django.utils.html import format_html
 from .models import (
     User, Booking, Payment, EventType,
-    Review, ReviewReply, Notification, ContactMessage,
+    Review, ReviewReply, Notification, ContactMessage, BookingStatusHistory, EmailDeliveryLog,
 )
 
 # organizer_site kept for backward compat with urls.py import
@@ -30,6 +31,7 @@ STATUS_COLORS = {
     'pending':              '#f59e0b',
     'confirmed':            '#10b981',
     'declined':             '#ef4444',
+    'cancelled':            '#6b7280',
     'paid':                 '#10b981',
     'pending_verification': '#6366f1',
     'rejected':             '#ef4444',
@@ -84,7 +86,7 @@ class BookingAdmin(admin.ModelAdmin):
     list_filter   = ['status', 'payment_status', 'event_type', 'time_slot', 'date']
     search_fields = ['user__email', 'user__first_name', 'user__last_name', 'event_type']
     ordering      = ['-created_at']
-    readonly_fields = ['created_at', 'total_amount', 'payment_deadline']
+    readonly_fields = ['created_at', 'total_amount', 'payment_deadline', 'accepted_at']
     date_hierarchy = 'date'
     list_per_page = 25
     actions = ['approve_bookings', 'decline_bookings']
@@ -97,7 +99,7 @@ class BookingAdmin(admin.ModelAdmin):
             'fields': ('date', 'time', 'time_slot', 'whole_day', 'location')
         }),
         ('Status', {
-            'fields': ('status', 'decline_reason', 'cancel_reason')
+            'fields': ('status', 'accepted_at', 'decline_reason', 'cancel_reason')
         }),
         ('Payment', {
             'fields': ('payment_status', 'payment_method', 'total_amount', 'payment_deadline', 'gcash_reference', 'payment_proof')
@@ -121,7 +123,7 @@ class BookingAdmin(admin.ModelAdmin):
     payment_badge.short_description = 'Payment'
 
     def approve_bookings(self, request, queryset):
-        updated = queryset.filter(status='pending').update(status='confirmed')
+        updated = queryset.filter(status='pending').update(status='confirmed', accepted_at=timezone.now())
         self.message_user(request, f'{updated} booking(s) confirmed.')
     approve_bookings.short_description = 'Approve selected bookings'
 
@@ -129,6 +131,24 @@ class BookingAdmin(admin.ModelAdmin):
         updated = queryset.filter(status='pending').update(status='declined')
         self.message_user(request, f'{updated} booking(s) declined.')
     decline_bookings.short_description = 'Decline selected bookings'
+
+
+@admin.register(BookingStatusHistory)
+class BookingStatusHistoryAdmin(admin.ModelAdmin):
+    list_display = ['booking', 'from_status', 'to_status', 'actor', 'created_at']
+    list_filter = ['to_status', 'created_at']
+    search_fields = ['booking__user__email', 'booking__event_type', 'reason', 'actor__email']
+    ordering = ['-created_at']
+    readonly_fields = ['booking', 'from_status', 'to_status', 'reason', 'actor', 'metadata', 'created_at']
+
+
+@admin.register(EmailDeliveryLog)
+class EmailDeliveryLogAdmin(admin.ModelAdmin):
+    list_display = ['recipient', 'subject', 'status', 'channel', 'created_at']
+    list_filter = ['status', 'channel', 'created_at']
+    search_fields = ['recipient', 'subject', 'error_message', 'provider_message_id']
+    ordering = ['-created_at']
+    readonly_fields = ['recipient', 'subject', 'status', 'channel', 'error_message', 'provider_message_id', 'payload', 'created_at', 'updated_at']
 
 
 @admin.register(Payment)
@@ -162,7 +182,7 @@ class EventTypeAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ('Basic Info',         {'fields': ('event_type', 'description', 'is_active')}),
-        ('Image',              {'fields': ('image_url', 'image_preview')}),
+        ('Image',              {'fields': ('image', 'image_url', 'image_preview')}),
         ('Pricing & Capacity', {'fields': ('price', 'max_capacity', 'people_per_table', 'max_invited_emails')}),
         ('Timestamps',         {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
     )
@@ -176,6 +196,11 @@ class EventTypeAdmin(admin.ModelAdmin):
     active_badge.short_description = 'Status'
 
     def image_preview(self, obj):
+        if obj.image:
+            try:
+                return format_html('<img src="{}" style="height:80px;border-radius:8px;object-fit:cover;" />', obj.image.url)
+            except Exception:
+                pass
         if obj.image_url:
             return format_html('<img src="{}" style="height:80px;border-radius:8px;object-fit:cover;" />', obj.image_url)
         return '— Paste an image URL above'
@@ -271,5 +296,3 @@ class ContactMessageAdmin(admin.ModelAdmin):
     def replied_badge(self, obj):
         return _badge('Replied', '#10b981') if obj.reply else _badge('Pending', '#94a3b8')
     replied_badge.short_description = 'Reply'
-
-
