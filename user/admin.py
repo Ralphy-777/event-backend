@@ -5,7 +5,7 @@ from django.utils.html import format_html
 from .models import (
     User, Booking, Payment, EventType,
     Review, ReviewReply, Notification, ContactMessage, BookingStatusHistory, EmailDeliveryLog,
-    LandingCarouselImage,
+    LandingCarouselImage, DamageReport,
 )
 
 # organizer_site kept for backward compat with urls.py import
@@ -231,6 +231,47 @@ class LandingCarouselImageAdmin(admin.ModelAdmin):
         return 'No image yet'
     image_preview.short_description = 'Preview'
 
+
+
+
+@admin.register(DamageReport)
+class DamageReportAdmin(admin.ModelAdmin):
+    list_display  = ['id', 'booking_link', 'client_name', 'item_type', 'item_name', 'quantity', 'estimated_cost', 'recovered_amount', 'status_badge', 'charge_to_client', 'created_at']
+    list_filter   = ['status', 'item_type', 'charge_to_client', 'created_at']
+    search_fields = ['booking__user__email', 'item_name', 'notes']
+    ordering      = ['-created_at']
+    readonly_fields = ['created_at', 'updated_at', 'photo_preview']
+
+    fieldsets = (
+        ('Booking Info', {'fields': ('booking', 'reported_by')}),
+        ('Damage Details', {'fields': ('item_type', 'item_name', 'quantity', 'notes')}),
+        ('Financials', {'fields': ('estimated_cost', 'recovered_amount', 'charge_to_client')}),
+        ('Status & Photo', {'fields': ('status', 'photo', 'photo_preview')}),
+        ('Timestamps', {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
+    )
+
+    def booking_link(self, obj):
+        return format_html('<a href="/admin/user/booking/{}/change/">Booking #{}</a>', obj.booking_id, obj.booking_id)
+    booking_link.short_description = 'Booking'
+
+    def client_name(self, obj):
+        u = obj.booking.user
+        return f'{u.first_name} {u.last_name}'.strip() or u.email
+    client_name.short_description = 'Client'
+
+    def status_badge(self, obj):
+        colors = {'reported': '#f59e0b', 'billed': '#0ea5e9', 'resolved': '#10b981', 'waived': '#6b7280'}
+        return _badge(obj.get_status_display(), colors.get(obj.status, '#64748b'))
+    status_badge.short_description = 'Status'
+
+    def photo_preview(self, obj):
+        if not obj.photo:
+            return 'No photo uploaded'
+        try:
+            return format_html('<img src="{}" style="height:120px;border-radius:8px;object-fit:cover;" />', obj.photo.url)
+        except Exception:
+            return 'Preview unavailable'
+    photo_preview.short_description = 'Photo Preview'
 
 @admin.register(Review)
 class ReviewAdmin(admin.ModelAdmin):
