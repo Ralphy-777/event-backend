@@ -24,6 +24,7 @@ urlpatterns = [
     path('gcash/initiate/', views.initiate_gcash_payment, name='initiate_gcash_payment'),
     path('gcash/notify/', views.gcash_payment_notify, name='gcash_payment_notify'),
     path('paymongo/gcash/', views.create_paymongo_gcash, name='create_paymongo_gcash'),
+    path('paymongo/qrph/', views.create_paymongo_qrph, name='create_paymongo_qrph'),
     path('paymongo/webhook/', views.paymongo_webhook, name='paymongo_webhook'),
     path('paymongo/gcash/', views.create_paymongo_gcash, name='create_paymongo_gcash'),
     path('paymongo/webhook/', views.paymongo_webhook, name='paymongo_webhook'),

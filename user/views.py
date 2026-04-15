@@ -1208,7 +1208,7 @@ def create_booking(request):
         invitation_result = _send_invitation_emails(booking, confirmed=False)
 
         # Handle payment based on method
-        if payment_method == 'GCash':
+        if payment_method in ['GCash', 'QRPh']:
             booking.payment_status = 'pending'
             booking.save()
             _record_booking_history(
@@ -1216,14 +1216,14 @@ def create_booking(request):
                 from_status='pending',
                 to_status='payment_submitted',
                 actor=request.user,
-                reason='GCash payment selected.',
-                metadata={'payment_status': booking.payment_status},
+                reason=f'{payment_method} payment selected.',
+                metadata={'payment_status': booking.payment_status, 'payment_method': payment_method},
             )
             return Response({
                 'message': 'Booking created successfully',
                 'booking_id': booking.id,
                 'total_amount': float(booking.total_amount),
-                'payment_method': 'GCash',
+                'payment_method': payment_method,
                 'requires_payment': True,
                 'warnings': _conflict_summary(date, time_slot, booking.time)['warnings'],
                 'invitation_status': invitation_result,
@@ -1579,7 +1579,7 @@ def update_payment_preference(request):
     user = request.user
     payment_method = request.data.get('payment_method')
     
-    if payment_method not in ['Cash', 'GCash']:
+    if payment_method not in ['Cash', 'GCash', 'QRPh']:
         return Response({'message': 'Invalid payment method'}, status=status.HTTP_400_BAD_REQUEST)
     
     user.preferred_payment_method = payment_method
@@ -1626,6 +1626,49 @@ def initiate_gcash_payment(request):
         return Response({'message': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _mark_booking_paid_from_paymongo(booking, reference_number, payment_method, actor=None, history_reason='PayMongo marked the payment as paid.'):
+    previous_payment_status = booking.payment_status
+    booking.payment_status = 'paid'
+    booking.payment_method = payment_method or booking.payment_method
+    booking.save(update_fields=['payment_status', 'payment_method'])
+    _record_booking_history(
+        booking,
+        from_status=previous_payment_status or booking.status,
+        to_status='payment_confirmed',
+        actor=actor,
+        reason=history_reason,
+        metadata={'payment_status': booking.payment_status, 'payment_method': booking.payment_method},
+    )
+
+    Payment.objects.get_or_create(
+        booking=booking,
+        defaults={
+            'event_id': booking.id,
+            'event_name': booking.event_type,
+            'client_name': f'{booking.user.first_name} {booking.user.last_name}',
+            'payment_method': booking.payment_method,
+            'reference_number': reference_number,
+            'amount': booking.total_amount,
+        }
+    )
+
+    client_msg = f'Your {booking.payment_method} payment for {booking.event_type} booking on {booking.date} has been confirmed!'
+    Notification.objects.create(user=booking.user, message=client_msg)
+    send_ws_notification(booking.user.id, client_msg, notif_type='payment_confirmed')
+
+    organizers = User.objects.filter(is_organizer=True, is_active=True)
+    for org in organizers:
+        org_msg = (
+            f'{booking.payment_method} payment received via PayMongo for {booking.event_type} '
+            f'booking (#{booking.id}) by {booking.user.first_name} {booking.user.last_name}. '
+            f'Amount: ₱{booking.total_amount}'
+        )
+        Notification.objects.create(user=org, message=org_msg)
+        send_ws_notification(org.id, org_msg, notif_type='payment_confirmed')
+
+    send_payment_confirmed_email(booking.user.email, booking.user.first_name, booking, reference_number)
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def create_paymongo_gcash(request):
@@ -1655,8 +1698,8 @@ def create_paymongo_gcash(request):
                         'currency': 'PHP',
                         'type': 'gcash',
                         'redirect': {
-                            'success': f'{settings.FRONTEND_URL}/payment-success?id={booking.id}',
-                            'failed': f'{settings.FRONTEND_URL}/payment?id={booking.id}&amount={booking.total_amount}&failed=1',
+                            'success': f'{settings.FRONTEND_URL}/payment-success?id={booking.id}&method=gcash',
+                            'failed': f'{settings.FRONTEND_URL}/payment?id={booking.id}&amount={booking.total_amount}&method=gcash&failed=1',
                         },
                     }
                 }
@@ -1696,6 +1739,93 @@ def create_paymongo_gcash(request):
 
 
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_paymongo_qrph(request):
+    import requests as http
+    import base64
+
+    booking_id = request.data.get('booking_id')
+    if not booking_id:
+        return Response({'message': 'booking_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        booking = Booking.objects.get(id=booking_id, user=request.user)
+    except Booking.DoesNotExist:
+        return Response({'message': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        amount_cents = int(float(str(booking.total_amount)) * 100)
+        secret_key = getattr(settings, 'PAYMONGO_SECRET_KEY', '')
+        credentials = base64.b64encode(f'{secret_key}:'.encode()).decode()
+
+        resp = http.post(
+            'https://api.paymongo.com/v1/checkout_sessions',
+            json={
+                'data': {
+                    'attributes': {
+                        'billing': {
+                            'name': f'{request.user.first_name} {request.user.last_name}'.strip() or request.user.email,
+                            'email': request.user.email,
+                        },
+                        'send_email_receipt': False,
+                        'show_description': True,
+                        'show_line_items': True,
+                        'description': f'EventPro Booking #{booking.id} - {booking.event_type}',
+                        'line_items': [
+                            {
+                                'currency': 'PHP',
+                                'amount': amount_cents,
+                                'name': booking.event_type,
+                                'quantity': 1,
+                                'description': f'EventPro venue booking #{booking.id}',
+                            }
+                        ],
+                        'payment_method_types': ['qrph'],
+                        'success_url': f'{settings.FRONTEND_URL}/payment-success?id={booking.id}&method=qrph',
+                        'cancel_url': f'{settings.FRONTEND_URL}/payment?id={booking.id}&amount={booking.total_amount}&method=qrph&failed=1',
+                        'metadata': {
+                            'booking_id': str(booking.id),
+                            'payment_method': 'QRPh',
+                        },
+                    }
+                }
+            },
+            headers={
+                'Authorization': f'Basic {credentials}',
+                'Content-Type': 'application/json',
+            },
+            timeout=15,
+        )
+
+        if not resp.ok:
+            return Response({'message': resp.text}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = resp.json()
+        checkout_session = data['data']
+        checkout_url = checkout_session['attributes']['checkout_url']
+
+        previous_payment_status = booking.payment_status
+        booking.payment_method = 'QRPh'
+        booking.gcash_reference = checkout_session['id']
+        booking.payment_status = 'pending'
+        booking.save(update_fields=['payment_method', 'gcash_reference', 'payment_status'])
+        _record_booking_history(
+            booking,
+            from_status=previous_payment_status or booking.status,
+            to_status='payment_submitted',
+            actor=request.user,
+            reason='PayMongo QR Ph checkout created.',
+            metadata={'payment_status': booking.payment_status, 'payment_method': booking.payment_method, 'checkout_session_id': booking.gcash_reference},
+        )
+
+        return Response({'checkout_url': checkout_url, 'checkout_session_id': checkout_session['id']})
+
+    except Exception as e:
+        logger.error('create_paymongo_qrph: %s', e)
+        return Response({'message': 'QR payment initiation failed. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
 @csrf_exempt
 def paymongo_webhook(request):
     """PayMongo sends a POST here when a source becomes chargeable."""
@@ -1703,13 +1833,55 @@ def paymongo_webhook(request):
     try:
         event = request.data
         event_type = event.get('data', {}).get('attributes', {}).get('type', '')
-        source_data = event.get('data', {}).get('attributes', {}).get('data', {})
+        payload_data = event.get('data', {}).get('attributes', {}).get('data', {})
+
+        if event_type in ['checkout_session.payment.paid', 'payment.paid']:
+            booking = None
+            reference_number = None
+            payment_method = 'QRPh'
+
+            if event_type == 'checkout_session.payment.paid':
+                session_attrs = payload_data.get('attributes', {})
+                metadata = session_attrs.get('metadata', {}) or {}
+                booking_id = metadata.get('booking_id')
+                if booking_id:
+                    booking = Booking.objects.filter(id=booking_id).first()
+                payment_entries = session_attrs.get('payments') or []
+                if payment_entries:
+                    payment_payload = payment_entries[0]
+                    payment_attrs = payment_payload.get('attributes', {})
+                    reference_number = payment_payload.get('id') or payload_data.get('id')
+                    if not booking:
+                        payment_intent_id = payment_attrs.get('payment_intent_id')
+                        if payment_intent_id:
+                            booking = Booking.objects.filter(gcash_reference=payment_intent_id).first()
+                payment_method = metadata.get('payment_method') or (booking.payment_method if booking else 'QRPh')
+            elif event_type == 'payment.paid':
+                payment_attrs = payload_data.get('attributes', {})
+                metadata = payment_attrs.get('metadata', {}) or {}
+                payment_intent_id = payment_attrs.get('payment_intent_id')
+                booking_id = metadata.get('booking_id')
+                if booking_id:
+                    booking = Booking.objects.filter(id=booking_id).first()
+                if not booking and payment_intent_id:
+                    booking = Booking.objects.filter(gcash_reference=payment_intent_id).first()
+                reference_number = payload_data.get('id') or payment_intent_id
+                payment_method = metadata.get('payment_method') or (booking.payment_method if booking else 'QRPh')
+
+            if booking and reference_number and booking.payment_status != 'paid':
+                _mark_booking_paid_from_paymongo(
+                    booking,
+                    reference_number=reference_number,
+                    payment_method=payment_method,
+                    history_reason='PayMongo webhook marked the payment as paid.',
+                )
+            return Response({'received': True})
 
         if event_type != 'source.chargeable':
             return Response({'received': True})
 
-        source_id = source_data.get('id')
-        amount_cents = source_data.get('attributes', {}).get('amount')
+        source_id = payload_data.get('id')
+        amount_cents = payload_data.get('attributes', {}).get('amount')
 
         try:
             booking = Booking.objects.get(gcash_reference=source_id)
@@ -1735,42 +1907,14 @@ def paymongo_webhook(request):
         )
         resp.raise_for_status()
         payment = resp.json()['data']
-        payment_status = payment['attributes']['status']
 
-        if payment_status == 'paid':
-            previous_payment_status = booking.payment_status
-            booking.payment_status = 'paid'
-            booking.save(update_fields=['payment_status'])
-            _record_booking_history(
+        if payment['attributes']['status'] == 'paid':
+            _mark_booking_paid_from_paymongo(
                 booking,
-                from_status=previous_payment_status or booking.status,
-                to_status='payment_confirmed',
-                reason='PayMongo webhook marked the payment as paid.',
-                metadata={'payment_status': booking.payment_status},
+                reference_number=payment['id'],
+                payment_method='GCash',
+                history_reason='PayMongo webhook marked the payment as paid.',
             )
-            reference_number = payment['id']
-            Payment.objects.get_or_create(
-                booking=booking,
-                defaults={
-                    'event_id': booking.id,
-                    'event_name': booking.event_type,
-                    'client_name': f'{booking.user.first_name} {booking.user.last_name}',
-                    'payment_method': 'GCash',
-                    'reference_number': reference_number,
-                    'amount': booking.total_amount,
-                }
-            )
-            # Notify client
-            client_msg = f'Your GCash payment for {booking.event_type} booking on {booking.date} has been confirmed!'
-            Notification.objects.create(user=booking.user, message=client_msg)
-            send_ws_notification(booking.user.id, client_msg, notif_type='payment_confirmed')
-            # Notify all organizers
-            organizers = User.objects.filter(is_organizer=True, is_active=True)
-            for org in organizers:
-                org_msg = f'GCash payment received via PayMongo for {booking.event_type} booking (#{booking.id}) by {booking.user.first_name} {booking.user.last_name}. Amount: ₱{booking.total_amount}'
-                Notification.objects.create(user=org, message=org_msg)
-                send_ws_notification(org.id, org_msg, notif_type='payment_confirmed')
-            send_payment_confirmed_email(booking.user.email, booking.user.first_name, booking, reference_number)
 
         return Response({'received': True})
     except Exception as e:
@@ -1790,6 +1934,12 @@ def upload_payment_proof(request, booking_id):
     try:
         booking = Booking.objects.get(id=booking_id, user=request.user)
         
+        if booking.status != 'confirmed':
+            return Response({'message': 'Payment proof can only be uploaded after the owner accepts your booking.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if booking.payment_method != 'GCash':
+            return Response({'message': 'Manual payment proof is only available for GCash bookings.'}, status=status.HTTP_400_BAD_REQUEST)
+
         if booking.payment_status == 'paid':
             return Response({'message': 'Payment already confirmed'}, status=status.HTTP_400_BAD_REQUEST)
         
@@ -1798,9 +1948,6 @@ def upload_payment_proof(request, booking_id):
         
         if not payment_proof:
             return Response({'message': 'Payment proof image is required'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        if not gcash_reference or gcash_reference.strip() == '':
-            return Response({'message': 'GCash Reference Number is required'}, status=status.HTTP_400_BAD_REQUEST)
         
         if not gcash_reference or gcash_reference.strip() == '':
             return Response({'message': 'GCash Reference Number is required'}, status=status.HTTP_400_BAD_REQUEST)
