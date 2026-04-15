@@ -5,6 +5,7 @@ from django.utils.html import format_html
 from .models import (
     User, Booking, Payment, EventType,
     Review, ReviewReply, Notification, ContactMessage, BookingStatusHistory, EmailDeliveryLog,
+    LandingCarouselImage,
 )
 
 # organizer_site kept for backward compat with urls.py import
@@ -204,6 +205,30 @@ class EventTypeAdmin(admin.ModelAdmin):
         if obj.image_url:
             return format_html('<img src="{}" style="height:80px;border-radius:8px;object-fit:cover;" />', obj.image_url)
         return '— Paste an image URL above'
+    image_preview.short_description = 'Preview'
+
+
+@admin.register(LandingCarouselImage)
+class LandingCarouselImageAdmin(admin.ModelAdmin):
+    list_display = ['title', 'image_preview', 'display_order', 'is_active', 'updated_at']
+    list_editable = ['display_order', 'is_active']
+    list_filter = ['is_active']
+    search_fields = ['title', 'subtitle']
+    ordering = ['display_order', 'id']
+    readonly_fields = ['created_at', 'updated_at', 'image_preview']
+
+    fieldsets = (
+        ('Content', {'fields': ('title', 'subtitle', 'is_active')}),
+        ('Image', {'fields': ('image', 'image_url', 'image_preview')}),
+        ('Display', {'fields': ('display_order',)}),
+        ('Timestamps', {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
+    )
+
+    def image_preview(self, obj):
+        image = obj.get_image() if obj else None
+        if image:
+            return format_html('<img src="{}" style="height:90px;width:150px;border-radius:12px;object-fit:cover;" />', image)
+        return 'No image yet'
     image_preview.short_description = 'Preview'
 
 

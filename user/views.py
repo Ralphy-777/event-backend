@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import Booking, Payment, EventType, Review, ReviewReply, Notification, ContactMessage, BookingStatusHistory
+from .models import Booking, Payment, EventType, Review, ReviewReply, Notification, ContactMessage, BookingStatusHistory, LandingCarouselImage
 from datetime import datetime, date as date_type, timedelta
 from django.conf import settings
 from .mailer import (
@@ -399,6 +399,33 @@ def get_event_types(request):
             'people_per_table': et.people_per_table,
             'description': et.description,
             'image': image,
+        })
+    return Response(data)
+
+
+@api_view(['GET'])
+def get_landing_carousel(request):
+    carousel_images = LandingCarouselImage.objects.filter(is_active=True).order_by('display_order', 'id')
+    data = []
+    for item in carousel_images:
+        image = None
+        if item.image:
+            try:
+                image = request.build_absolute_uri(item.image.url)
+            except Exception:
+                image = None
+        elif item.image_url:
+            image = item.image_url
+
+        if not image:
+            continue
+
+        data.append({
+            'id': item.id,
+            'title': item.title,
+            'subtitle': item.subtitle,
+            'image': image,
+            'display_order': item.display_order,
         })
     return Response(data)
 
@@ -1326,6 +1353,9 @@ def get_profile(request):
         'address': user.address,
         'preferred_payment_method': user.preferred_payment_method,
         'profile_photo': photo_url,
+        'is_superuser': user.is_superuser,
+        'is_staff': user.is_staff,
+        'is_organizer': user.is_organizer,
     })
 
 

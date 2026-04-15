@@ -59,6 +59,30 @@ class EventType(models.Model):
         return f"{self.event_type} - \u20b1{self.price}"
 
 
+class LandingCarouselImage(models.Model):
+    title = models.CharField(max_length=150)
+    subtitle = models.TextField(blank=True)
+    image = models.ImageField(upload_to='landing_carousel/', null=True, blank=True)
+    image_url = models.URLField(max_length=500, blank=True, help_text='Paste an image URL if direct upload is unavailable.')
+    display_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['display_order', 'id']
+        verbose_name = 'Landing Carousel Image'
+        verbose_name_plural = 'Landing Carousel Images'
+
+    def get_image(self):
+        if self.image:
+            return self.image.url
+        return self.image_url or None
+
+    def __str__(self):
+        return self.title
+
+
 class Booking(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bookings')
     event_type = models.CharField(max_length=100)

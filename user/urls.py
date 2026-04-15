@@ -18,6 +18,7 @@ urlpatterns = [
     path('profile/change-email/', views.request_email_change, name='request_email_change'),
     path('profile/verify-email-change/', views.verify_email_change, name='verify_email_change'),
     path('event-types/', views.get_event_types, name='get_event_types'),
+    path('landing-carousel/', views.get_landing_carousel, name='get_landing_carousel'),
     path('stats/public/', views.get_public_stats, name='get_public_stats'),
     path('bookings/reason-templates/', views.get_booking_reason_templates, name='get_booking_reason_templates'),
     path('gcash/initiate/', views.initiate_gcash_payment, name='initiate_gcash_payment'),
