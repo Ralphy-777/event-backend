@@ -179,6 +179,42 @@ class Payment(models.Model):
         return f"Payment {self.reference_number} - {self.client_name}"
 
 
+class DamageReport(models.Model):
+    ITEM_TYPE_CHOICES = [
+        ('chair', 'Chair'),
+        ('table', 'Table'),
+        ('decor', 'Decor'),
+        ('equipment', 'Equipment'),
+        ('other', 'Other'),
+    ]
+    STATUS_CHOICES = [
+        ('reported', 'Reported'),
+        ('billed', 'Billed to Client'),
+        ('resolved', 'Resolved'),
+        ('waived', 'Waived'),
+    ]
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='damage_reports')
+    reported_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='damage_reports_created')
+    item_type = models.CharField(max_length=30, choices=ITEM_TYPE_CHOICES, default='other')
+    item_name = models.CharField(max_length=120, blank=True, default='')
+    quantity = models.PositiveIntegerField(default=1)
+    estimated_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    recovered_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    charge_to_client = models.BooleanField(default=False)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='reported')
+    notes = models.TextField(blank=True, default='')
+    photo = models.ImageField(upload_to='damage_reports/', null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        item = self.item_name or self.get_item_type_display()
+        return f'Damage #{self.id} - {item} for Booking #{self.booking_id}'
+
+
 class Review(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reviews', null=True, blank=True)
     guest_email = models.EmailField(blank=True, default='')
