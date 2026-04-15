@@ -2,6 +2,11 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from decimal import Decimal
 
+HALL_INCLUDED_CAPACITY = 50
+HALL_SINGLE_HALL_LIMIT = 70
+HALL_EXCESS_PERSON_FEE = Decimal('200')
+
+
 class User(AbstractUser):
     email = models.EmailField(unique=True)
     first_name = models.CharField(max_length=100)
@@ -41,6 +46,8 @@ class EventType(models.Model):
     description = models.TextField(blank=True)
     image = models.ImageField(upload_to='event_types/', null=True, blank=True)
     image_url = models.URLField(max_length=500, blank=True, help_text='Paste an image URL (use this on Render instead of uploading)')
+    extension_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text='Fee charged for time extension')
+    extension_hours = models.PositiveIntegerField(default=3, help_text='Hours added per extension')
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -102,6 +109,10 @@ class Booking(models.Model):
     whole_day = models.BooleanField(default=False)
     time_slot = models.CharField(max_length=20, default='morning', choices=[('morning', 'Morning'), ('afternoon', 'Afternoon'), ('whole_day', 'Whole Day')])
     reminder_sent = models.BooleanField(default=False)
+    end_time = models.DateTimeField(null=True, blank=True)
+    is_extended = models.BooleanField(default=False)
+    extension_notified_1h = models.BooleanField(default=False)
+    extension_notified_30m = models.BooleanField(default=False)
     decline_reason = models.TextField(blank=True, default='')
     cancel_reason = models.TextField(blank=True, default='')
     special_requests = models.TextField(blank=True, null=True, default='')
@@ -121,9 +132,11 @@ class Booking(models.Model):
             base = event_type_obj.price
         except EventType.DoesNotExist:
             base = Decimal('5000')
+        excess_guests = max(0, int(self.capacity or 0) - HALL_INCLUDED_CAPACITY)
+        excess_total = Decimal(excess_guests) * HALL_EXCESS_PERSON_FEE
         if self.time_slot == 'whole_day' or self.whole_day:
-            return round(base * 2 * Decimal('0.8'), 2)
-        return base
+            return round((base * 2 * Decimal('0.8')) + excess_total, 2)
+        return round(base + excess_total, 2)
 
 
 class BookingStatusHistory(models.Model):
@@ -178,6 +191,28 @@ class Payment(models.Model):
     def __str__(self):
         return f"Payment {self.reference_number} - {self.client_name}"
 
+
+
+
+class BookingExtension(models.Model):
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('declined', 'Declined'),
+    ]
+    booking = models.OneToOneField(Booking, on_delete=models.CASCADE, related_name='extension')
+    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='extension_requests')
+    extension_hours = models.PositiveIntegerField(default=3)
+    extension_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'Extension for Booking #{self.booking_id} - {self.status}'
 
 class DamageReport(models.Model):
     ITEM_TYPE_CHOICES = [

@@ -4,7 +4,20 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import Booking, Payment, EventType, Review, ReviewReply, Notification, ContactMessage, BookingStatusHistory, LandingCarouselImage
+from .models import (
+    Booking,
+    Payment,
+    EventType,
+    Review,
+    ReviewReply,
+    Notification,
+    ContactMessage,
+    BookingStatusHistory,
+    LandingCarouselImage, BookingExtension,
+    HALL_INCLUDED_CAPACITY,
+    HALL_SINGLE_HALL_LIMIT,
+    HALL_EXCESS_PERSON_FEE,
+)
 from datetime import datetime, date as date_type, timedelta
 from django.conf import settings
 from .mailer import (
@@ -26,6 +39,7 @@ import random
 import string
 import threading
 import sys
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +58,95 @@ CANCEL_REASON_TEMPLATES = [
     {'key': 'schedule_conflict', 'label': 'Schedule conflict', 'text': 'The booking was cancelled because of a schedule conflict.'},
     {'key': 'duplicate_request', 'label': 'Duplicate request', 'text': 'The booking was cancelled because a duplicate request already exists.'},
 ]
+
+DEFAULT_HALL_BASE_PRICE = Decimal('5000')
+MAX_SLOTS = 5
+
+
+def _get_hall_base_price(event_type_obj):
+    return Decimal(str(event_type_obj.price)) if event_type_obj else DEFAULT_HALL_BASE_PRICE
+
+
+def _get_guest_count(value):
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _get_pricing_payload(event_type_obj, guest_count):
+    base_price = _get_hall_base_price(event_type_obj)
+    excess_guests = max(0, guest_count - HALL_INCLUDED_CAPACITY)
+    excess_total = Decimal(excess_guests) * HALL_EXCESS_PERSON_FEE
+    return {
+        'base_price': float(base_price),
+        'included_capacity': HALL_INCLUDED_CAPACITY,
+        'max_capacity': HALL_SINGLE_HALL_LIMIT,
+        'excess_person_fee': float(HALL_EXCESS_PERSON_FEE),
+        'excess_guests': excess_guests,
+        'excess_total': float(excess_total),
+        'total_amount': float(base_price + excess_total),
+        'single_hall_supported': guest_count <= HALL_SINGLE_HALL_LIMIT if guest_count > 0 else True,
+    }
+
+
+def _build_combo_suggestions(selected_event_type_name, guest_count):
+    if guest_count <= HALL_SINGLE_HALL_LIMIT:
+        return []
+
+    halls = list(EventType.objects.filter(is_active=True).order_by('event_type'))
+    selected_hall = next((hall for hall in halls if hall.event_type == selected_event_type_name), None)
+    other_halls = [hall for hall in halls if hall.event_type != selected_event_type_name]
+    suggestions = []
+
+    if selected_hall:
+        for other_hall in other_halls:
+            suggestions.append({
+                'label': f'{selected_hall.event_type} + {other_hall.event_type}',
+                'combined_capacity': HALL_SINGLE_HALL_LIMIT * 2,
+                'base_price': float(_get_hall_base_price(selected_hall) + _get_hall_base_price(other_hall)),
+                'halls': [selected_hall.event_type, other_hall.event_type],
+            })
+
+    if len(suggestions) < 3:
+        for index, first_hall in enumerate(halls):
+            for second_hall in halls[index + 1:]:
+                label = f'{first_hall.event_type} + {second_hall.event_type}'
+                if any(item['label'] == label for item in suggestions):
+                    continue
+                suggestions.append({
+                    'label': label,
+                    'combined_capacity': HALL_SINGLE_HALL_LIMIT * 2,
+                    'base_price': float(_get_hall_base_price(first_hall) + _get_hall_base_price(second_hall)),
+                    'halls': [first_hall.event_type, second_hall.event_type],
+                })
+                if len(suggestions) >= 4:
+                    break
+            if len(suggestions) >= 4:
+                break
+
+    return suggestions
+
+
+def _calculate_booking_end_time(booking_date, booking_time):
+    if not booking_date or not booking_time:
+        return None
+    if isinstance(booking_date, str):
+        try:
+            booking_date = datetime.strptime(booking_date, '%Y-%m-%d').date()
+        except ValueError:
+            return None
+    if isinstance(booking_time, str):
+        booking_time = booking_time.strip()
+        for time_format in ('%H:%M:%S', '%H:%M'):
+            try:
+                booking_time = datetime.strptime(booking_time, time_format).time()
+                break
+            except ValueError:
+                continue
+        if isinstance(booking_time, str):
+            return None
+    return timezone.make_aware(datetime.combine(booking_date, booking_time)) + timedelta(hours=8)
 
 
 def _serialize_status_history_entry(entry):
@@ -281,6 +384,42 @@ def _send_booking_reminders():
             send_ws_notification(booking.user.id, msg, notif_type='reminder_1h')
 
 
+
+
+def _check_end_time_notifications():
+    """Send notifications to clients whose booking end time is approaching."""
+    from django.utils import timezone as tz
+    now = tz.now()
+    # 1-hour warning
+    bookings_1h = Booking.objects.filter(
+        status='confirmed',
+        end_time__isnull=False,
+        extension_notified_1h=False,
+        end_time__lte=now + __import__('datetime').timedelta(hours=1),
+        end_time__gt=now,
+    ).select_related('user')
+    for booking in bookings_1h:
+        msg = f'Your {booking.event_type} booking ends in 1 hour! You can request a {booking.extension_hours if hasattr(booking, "extension_hours") else 3}-hour extension if needed.'
+        Notification.objects.create(user=booking.user, message=msg)
+        send_ws_notification(booking.user.id, msg, notif_type='end_time_warning_1h')
+        booking.extension_notified_1h = True
+        booking.save(update_fields=['extension_notified_1h'])
+
+    # 30-minute warning
+    bookings_30m = Booking.objects.filter(
+        status='confirmed',
+        end_time__isnull=False,
+        extension_notified_30m=False,
+        end_time__lte=now + __import__('datetime').timedelta(minutes=30),
+        end_time__gt=now,
+    ).select_related('user')
+    for booking in bookings_30m:
+        msg = f'Your {booking.event_type} booking ends in 30 minutes!'
+        Notification.objects.create(user=booking.user, message=msg)
+        send_ws_notification(booking.user.id, msg, notif_type='end_time_warning_30m')
+        booking.extension_notified_30m = True
+        booking.save(update_fields=['extension_notified_30m'])
+
 # ── Payment deadline checker (runs every hour) ──────────────────────────────
 def _start_deadline_checker():
     def _run():
@@ -288,9 +427,10 @@ def _start_deadline_checker():
         while True:
             try:
                 _check_payment_deadlines()
+                _check_end_time_notifications()
             except Exception as e:
                 logger.exception('Deadline checker error: %s', e)
-            time.sleep(3600)
+            time.sleep(1800)  # check every 30 minutes
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -394,9 +534,11 @@ def get_event_types(request):
             'id': et.id,
             'event_type': et.event_type,
             'price': float(et.price),
-            'max_capacity': et.max_capacity,
+            'included_capacity': HALL_INCLUDED_CAPACITY,
+            'max_capacity': HALL_SINGLE_HALL_LIMIT,
             'max_invited_emails': et.max_invited_emails,
             'people_per_table': et.people_per_table,
+            'excess_person_fee': float(HALL_EXCESS_PERSON_FEE),
             'description': et.description,
             'image': image,
         })
@@ -704,12 +846,14 @@ def check_availability(request):
     date = request.GET.get('date')
     if not date:
         return Response({'error': 'Date is required'}, status=status.HTTP_400_BAD_REQUEST)
+    event_type_name = request.GET.get('event_type', '').strip()
+    guest_count = _get_guest_count(request.GET.get('guest_count'))
+    event_type_obj = EventType.objects.filter(event_type=event_type_name, is_active=True).first() if event_type_name else None
 
     requested_slot = request.GET.get('time_slot', 'morning')
     if requested_slot not in ['morning', 'afternoon', 'whole_day']:
         requested_slot = 'morning'
 
-    MAX_SLOTS = 5
     active = _active_booking_queryset().filter(date=date)
 
     whole_day_count = active.filter(time_slot='whole_day').count()
@@ -750,6 +894,8 @@ def check_availability(request):
             'morning_nearly_full': morning_count >= 4,
             'afternoon_nearly_full': afternoon_count >= 4,
         },
+        'pricing': _get_pricing_payload(event_type_obj, guest_count),
+        'combo_suggestions': _build_combo_suggestions(event_type_name, guest_count),
         'duplicate_booking': duplicate_info,
     })
 
@@ -792,6 +938,11 @@ def get_bookings(request):
     bookings = Booking.objects.all().prefetch_related('status_history')
     data = []
     for b in bookings:
+        payment_reference = ''
+        try:
+            payment_reference = b.payment.reference_number
+        except Payment.DoesNotExist:
+            payment_reference = ''
         proof_url = None
         if b.payment_proof:
             try:
@@ -812,6 +963,7 @@ def get_bookings(request):
             'payment_proof': proof_url,
             'payment_method': b.payment_method,
             'total_amount': float(b.total_amount),
+            'reference_number': payment_reference,
             'decline_reason': b.decline_reason or '',
             'cancel_reason': b.cancel_reason or '',
             'status_history': _booking_status_history(b),
@@ -825,6 +977,19 @@ def get_my_bookings(request):
         bookings = Booking.objects.filter(user=request.user).prefetch_related('status_history')
         data = []
         for b in bookings:
+            payment_reference = ''
+            try:
+                payment_reference = b.payment.reference_number
+            except Payment.DoesNotExist:
+                payment_reference = ''
+            extension_data = None
+            if hasattr(b, 'extension'):
+                extension_data = {
+                    'status': b.extension.status,
+                    'extension_hours': b.extension.extension_hours,
+                    'extension_fee': float(b.extension.extension_fee),
+                    'created_at': b.extension.created_at.isoformat(),
+                }
             booking_data = {
                 'id': b.id,
                 'event_type': b.event_type,
@@ -837,7 +1002,10 @@ def get_my_bookings(request):
                 'payment_status': b.payment_status,
                 'payment_method': b.payment_method,
                 'total_amount': float(b.total_amount),
+                'reference_number': payment_reference,
                 'created_at': b.created_at.isoformat(),
+                'end_time': b.end_time.isoformat() if b.end_time else None,
+                'is_extended': b.is_extended,
                 'event_details': b.event_details,
                 'gcash_reference': b.gcash_reference or '',
                 'payment_proof': str(b.payment_proof) if b.payment_proof else None,
@@ -848,6 +1016,7 @@ def get_my_bookings(request):
                 'cancel_reason': b.cancel_reason or '',
                 'status_history': _booking_status_history(b),
                 'has_review': b.reviews.filter(user=request.user).exists(),
+                'extension': extension_data,
             }
             data.append(booking_data)
         
@@ -958,7 +1127,6 @@ def create_booking(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        MAX_SLOTS = 5
         active = _active_booking_queryset().filter(date=date)
         whole_day_booked = active.filter(time_slot='whole_day').count()
 
@@ -976,20 +1144,30 @@ def create_booking(request):
             if afternoon_used >= MAX_SLOTS:
                 return Response({'message': 'Afternoon slots are fully booked for this date'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate capacity against EventType max_capacity
-        try:
-            event_type_obj = EventType.objects.get(event_type=event_type, is_active=True)
-            if int(capacity) > event_type_obj.max_capacity:
-                return Response({'message': f'Maximum capacity for {event_type} is {event_type_obj.max_capacity} guests.'}, status=status.HTTP_400_BAD_REQUEST)
-        except EventType.DoesNotExist:
-            if int(capacity) > 100:
-                return Response({'message': 'Maximum capacity is 100'}, status=status.HTTP_400_BAD_REQUEST)
+        guest_count = _get_guest_count(capacity)
+        if guest_count <= 0:
+            return Response({'message': 'Guest count must be at least 1.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        event_type_obj = EventType.objects.filter(event_type=event_type, is_active=True).first()
+        if guest_count > HALL_SINGLE_HALL_LIMIT:
+            combo_suggestions = _build_combo_suggestions(event_type, guest_count)
+            return Response(
+                {
+                    'message': (
+                        f'{event_type} supports up to {HALL_SINGLE_HALL_LIMIT} guests in one hall only. '
+                        'Please use one of the suggested hall combinations for bigger events.'
+                    ),
+                    'pricing': _get_pricing_payload(event_type_obj, guest_count),
+                    'combo_suggestions': combo_suggestions,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         booking = Booking.objects.create(
             user=request.user,
             event_type=event_type,
             description=description,
-            capacity=capacity,
+            capacity=guest_count,
             date=date,
             time=data.get('time'),
             location="Ralphy's Venue, Basak San Nicolas Villa Kalubihan Cebu City 6000.",
@@ -1002,10 +1180,11 @@ def create_booking(request):
             payment_status='paid',
             payment_method=payment_method,
             payment_deadline=timezone.now() + timedelta(days=3),
+            end_time=_calculate_booking_end_time(booking_date, data.get('time')),
         )
 
         # Calculate total amount
-        booking.total_amount = booking.calculate_amount()
+        booking.total_amount = Decimal(str(_get_pricing_payload(event_type_obj, guest_count)['total_amount']))
         booking.save()
         booking.refresh_from_db()  # ensure date/time are proper Python objects
         _record_booking_history(
@@ -1276,6 +1455,7 @@ def update_booking(request, booking_id):
         if new_time:
             booking.time = new_time
         booking.time_slot = new_time_slot
+        booking.end_time = _calculate_booking_end_time(booking.date, booking.time)
         booking.save()
         return Response({
             'message': 'Booking updated successfully',
@@ -2014,6 +2194,117 @@ def test_email(request):
             'has_bridge_secret': bool(settings.EMAIL_BRIDGE_SECRET),
         }, status=500)
 
+
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def request_extension(request, booking_id):
+    try:
+        booking = Booking.objects.get(id=booking_id, user=request.user)
+    except Booking.DoesNotExist:
+        return Response({'message': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if booking.status != 'confirmed':
+        return Response({'message': 'Only confirmed bookings can be extended.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if booking.is_extended:
+        return Response({'message': 'This booking has already been extended once.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if hasattr(booking, 'extension') and booking.extension.status == 'pending':
+        return Response({'message': 'Extension request already submitted. Waiting for owner approval.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        event_type_obj = EventType.objects.get(event_type=booking.event_type, is_active=True)
+        ext_fee = event_type_obj.extension_fee
+        ext_hours = event_type_obj.extension_hours
+    except EventType.DoesNotExist:
+        ext_fee = 0
+        ext_hours = 3
+
+    BookingExtension.objects.update_or_create(
+        booking=booking,
+        defaults={
+            'requested_by': request.user,
+            'extension_hours': ext_hours,
+            'extension_fee': ext_fee,
+            'status': 'pending',
+        }
+    )
+
+    organizers = User.objects.filter(is_organizer=True, is_active=True)
+    for org in organizers:
+        msg = f'{request.user.first_name} {request.user.last_name} requested a {ext_hours}-hour extension for {booking.event_type} booking on {booking.date}.'
+        Notification.objects.create(user=org, message=msg)
+        send_ws_notification(org.id, msg, notif_type='extension_requested')
+
+    return Response({
+        'message': 'Extension request submitted. Waiting for owner approval.',
+        'extension_fee': float(ext_fee),
+        'extension_hours': ext_hours,
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def handle_extension(request, booking_id):
+    if not request.user.is_organizer:
+        return Response({'message': 'Only owners can approve/decline extensions.'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        booking = Booking.objects.get(id=booking_id)
+        ext = booking.extension
+    except Booking.DoesNotExist:
+        return Response({'message': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
+    except BookingExtension.DoesNotExist:
+        return Response({'message': 'No extension request found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    action = request.data.get('action')
+    if action not in ['approve', 'decline']:
+        return Response({'message': 'Invalid action.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    ext.status = 'approved' if action == 'approve' else 'declined'
+    ext.save()
+
+    if action == 'approve':
+        from datetime import timedelta
+        booking.is_extended = True
+        if booking.end_time:
+            booking.end_time = booking.end_time + timedelta(hours=ext.extension_hours)
+        booking.total_amount = booking.total_amount + ext.extension_fee
+        booking.save(update_fields=['is_extended', 'end_time', 'total_amount'])
+        msg = f'Your extension request for {booking.event_type} on {booking.date} has been approved! +{ext.extension_hours} hours added. Additional fee: ₱{ext.extension_fee}.'
+        notif_type = 'extension_approved'
+    else:
+        msg = f'Your extension request for {booking.event_type} on {booking.date} was declined.'
+        notif_type = 'extension_declined'
+
+    Notification.objects.create(user=booking.user, message=msg)
+    send_ws_notification(booking.user.id, msg, notif_type=notif_type)
+
+    return Response({'message': f'Extension {ext.status}.'})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_extension_requests(request):
+    if not request.user.is_organizer:
+        return Response({'message': 'Only owners can view extension requests.'}, status=status.HTTP_403_FORBIDDEN)
+
+    extensions = BookingExtension.objects.select_related('booking', 'booking__user').filter(status='pending')
+    data = [{
+        'id': e.id,
+        'booking_id': e.booking_id,
+        'event_type': e.booking.event_type,
+        'date': str(e.booking.date),
+        'client': f'{e.booking.user.first_name} {e.booking.user.last_name}',
+        'extension_hours': e.extension_hours,
+        'extension_fee': float(e.extension_fee),
+        'status': e.status,
+        'end_time': e.booking.end_time.isoformat() if e.booking.end_time else None,
+        'created_at': e.created_at.isoformat(),
+    } for e in extensions]
+    return Response(data)
 
 @api_view(['DELETE'])
 def remove_concert_event_type(request):
