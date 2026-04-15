@@ -35,3 +35,11 @@ class Migration(migrations.Migration):
             },
         ),
     ]
+
+    def apply(self, project_state, schema_editor, collect_sql=False):
+        from django.db import connection
+        tables = connection.introspection.table_names()
+        if 'user_damagereport' in tables:
+            # Table already exists, just update state without running SQL
+            return project_state.clone()
+        return super().apply(project_state, schema_editor, collect_sql)
