@@ -1365,18 +1365,6 @@ def update_booking_status(request, booking_id):
         if new_status == 'declined' and not decline_reason:
             return Response({'message': 'Please provide a reason for declining.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if (
-            new_status == 'confirmed'
-            and booking.payment_method == 'GCash'
-            and booking.payment_status != 'paid'
-        ):
-            return Response(
-                {
-                    'message': 'GCash bookings can only be accepted after the client submits proof and you approve the payment.',
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        
         previous_status = booking.status
         booking.status = new_status
         if new_status == 'confirmed' and previous_status != 'confirmed':
@@ -2085,8 +2073,8 @@ def upload_payment_proof(request, booking_id):
     try:
         booking = Booking.objects.get(id=booking_id, user=request.user)
         
-        if booking.status not in ['pending', 'confirmed']:
-            return Response({'message': 'Payment proof can only be uploaded for active bookings.'}, status=status.HTTP_400_BAD_REQUEST)
+        if booking.status != 'confirmed':
+            return Response({'message': 'Payment proof can only be uploaded after the owner accepts your booking.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if booking.payment_method != 'GCash':
             return Response({'message': 'Manual payment proof is only available for GCash bookings.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -2133,7 +2121,7 @@ def upload_payment_proof(request, booking_id):
             send_ws_notification(org.id, proof_msg, notif_type='payment_proof')
 
         return Response({
-            'message': 'Payment proof uploaded successfully. Waiting for organizer review before booking approval.',
+            'message': 'Payment proof uploaded successfully. Waiting for organizer verification.',
             'booking_id': booking.id
         })
         
@@ -2656,13 +2644,7 @@ def verify_payment(request, booking_id):
 
             previous_payment_status = booking.payment_status
             booking.payment_status = 'paid'
-            previous_status = booking.status
-            update_fields = ['payment_status']
-            if booking.status != 'confirmed':
-                booking.status = 'confirmed'
-                booking.accepted_at = timezone.now()
-                update_fields.extend(['status', 'accepted_at'])
-            booking.save(update_fields=update_fields)
+            booking.save(update_fields=['payment_status'])
             _record_booking_history(
                 booking,
                 from_status=previous_payment_status or booking.status,
@@ -2687,22 +2669,7 @@ def verify_payment(request, booking_id):
                 }
             )
 
-            if previous_status != 'confirmed':
-                _record_booking_history(
-                    booking,
-                    from_status=previous_status,
-                    to_status='confirmed',
-                    actor=request.user,
-                    reason='Booking confirmed after organizer approved the GCash proof.',
-                    metadata={'payment_status': booking.payment_status},
-                )
-                notif_msg = f'Your {booking.event_type} booking on {booking.date} has been confirmed after payment review!'
-                Notification.objects.create(user=booking.user, message=notif_msg)
-                send_ws_notification(booking.user.id, notif_msg, notif_type='booking_confirmed')
-                send_booking_status_email(booking.user.email, booking.user.first_name, booking, 'confirmed')
-                _send_invitation_emails(booking, confirmed=True)
-
-            return Response({'message': 'Payment verified. Booking confirmed.'})
+            return Response({'message': 'Payment verified and approved'})
         elif action == 'reject':
             previous_payment_status = booking.payment_status
             booking.payment_status = 'rejected'
