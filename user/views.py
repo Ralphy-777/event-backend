@@ -2592,9 +2592,95 @@ def get_extension_requests(request):
     } for e in extensions]
     return Response(data)
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_damages(request):
+    if not request.user.is_organizer:
+        return Response({'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+    from .models import DamageReport
+    reports = DamageReport.objects.select_related('booking', 'booking__user', 'reported_by').all()
+    reports_data = []
+    for r in reports:
+        photo_url = None
+        if r.photo:
+            try:
+                url = r.photo.url
+                photo_url = url if url.startswith('http') else request.build_absolute_uri(url)
+            except Exception:
+                photo_url = str(r.photo)
+        reports_data.append({
+            'id': r.id,
+            'booking_id': r.booking_id,
+            'booking_event_type': r.booking.event_type,
+            'booking_date': str(r.booking.date),
+            'client_name': f'{r.booking.user.first_name} {r.booking.user.last_name}',
+            'item_type': r.item_type,
+            'item_name': r.item_name,
+            'quantity': r.quantity,
+            'estimated_cost': float(r.estimated_cost),
+            'recovered_amount': float(r.recovered_amount),
+            'net_loss': float(r.estimated_cost - r.recovered_amount),
+            'charge_to_client': r.charge_to_client,
+            'status': r.status,
+            'notes': r.notes,
+            'photo': photo_url,
+            'reported_by': r.reported_by.get_full_name() if r.reported_by else None,
+            'created_at': r.created_at.isoformat(),
+            'updated_at': r.updated_at.isoformat(),
+        })
+    total_damage = sum(float(r.estimated_cost) for r in reports)
+    total_recovered = sum(float(r.recovered_amount) for r in reports)
+    gross_revenue = float(Booking.objects.filter(payment_status='paid').aggregate(
+        total=__import__('django.db.models', fromlist=['Sum']).Sum('total_amount')
+    )['total'] or 0)
+    summary = {
+        'gross_revenue': gross_revenue,
+        'total_damage_cost': total_damage,
+        'total_recovered': total_recovered,
+        'total_net_loss': total_damage - total_recovered,
+        'net_profit': gross_revenue - (total_damage - total_recovered),
+        'damage_reports_count': reports.count(),
+    }
+    return Response({'reports': reports_data, 'summary': summary})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def report_damage(request, booking_id):
+    if not request.user.is_organizer:
+        return Response({'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+    from .models import DamageReport
+    try:
+        booking = Booking.objects.get(id=booking_id)
+    except Booking.DoesNotExist:
+        return Response({'message': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
+    item_type = request.data.get('item_type', 'other')
+    item_name = request.data.get('item_name', '').strip()
+    quantity = int(request.data.get('quantity', 1))
+    estimated_cost = float(request.data.get('estimated_cost', 0))
+    recovered_amount = float(request.data.get('recovered_amount', 0))
+    charge_to_client = str(request.data.get('charge_to_client', 'false')).lower() == 'true'
+    status_val = request.data.get('status', 'reported')
+    notes = request.data.get('notes', '').strip()
+    photo = request.FILES.get('photo')
+    report = DamageReport.objects.create(
+        booking=booking,
+        reported_by=request.user,
+        item_type=item_type,
+        item_name=item_name,
+        quantity=quantity,
+        estimated_cost=estimated_cost,
+        recovered_amount=recovered_amount,
+        charge_to_client=charge_to_client,
+        status=status_val,
+        notes=notes,
+        photo=photo,
+    )
+    return Response({'message': 'Damage report saved.', 'id': report.id}, status=status.HTTP_201_CREATED)
+
+
 @api_view(['DELETE'])
 def remove_concert_event_type(request):
-    """One-time cleanup — remove Concert event type from DB"""
     EventType.objects.filter(event_type__icontains='concert').delete()
     return Response({'message': 'Concert event type removed'})
 
