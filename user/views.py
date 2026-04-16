@@ -90,6 +90,66 @@ def _get_pricing_payload(event_type_obj, guest_count):
     }
 
 
+def _resolve_selected_halls(raw_selected_halls, fallback_event_type=''):
+    if isinstance(raw_selected_halls, str):
+        selected_halls = [item.strip() for item in raw_selected_halls.split(',') if item.strip()]
+    elif isinstance(raw_selected_halls, list):
+        selected_halls = [str(item).strip() for item in raw_selected_halls if str(item).strip()]
+    else:
+        selected_halls = []
+
+    if not selected_halls and fallback_event_type:
+        selected_halls = [fallback_event_type.strip()]
+
+    seen = set()
+    normalized = []
+    for hall in selected_halls:
+        key = hall.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(hall)
+    return normalized
+
+
+def _get_hall_combo_pricing(selected_hall_names, guest_count):
+    hall_names = _resolve_selected_halls(selected_hall_names)
+    hall_objects = list(EventType.objects.filter(event_type__in=hall_names, is_active=True).order_by('event_type'))
+    hall_lookup = {hall.event_type: hall for hall in hall_objects}
+    ordered_halls = [hall_lookup[name] for name in hall_names if name in hall_lookup]
+
+    if not ordered_halls:
+        return None
+
+    base_price = sum(_get_hall_base_price(hall) for hall in ordered_halls)
+    included_capacity = sum(
+        hall.max_capacity if hall.max_capacity and hall.max_capacity > 0 else HALL_INCLUDED_CAPACITY
+        for hall in ordered_halls
+    )
+    max_capacity = sum(
+        hall.max_capacity if hall.max_capacity and hall.max_capacity > 0 else HALL_SINGLE_HALL_LIMIT
+        for hall in ordered_halls
+    )
+    excess_person_fee = max(
+        [HALL_EXCESS_PERSON_FEE] + [HALL_EXCESS_PERSON_FEE for _hall in ordered_halls]
+    )
+    excess_guests = max(0, guest_count - included_capacity)
+    excess_total = Decimal(excess_guests) * excess_person_fee
+
+    return {
+        'base_price': float(base_price),
+        'included_capacity': included_capacity,
+        'max_capacity': max_capacity,
+        'excess_person_fee': float(excess_person_fee),
+        'excess_guests': excess_guests,
+        'excess_total': float(excess_total),
+        'total_amount': float(base_price + excess_total),
+        'single_hall_supported': guest_count <= max_capacity if guest_count > 0 else True,
+        'selected_halls': [hall.event_type for hall in ordered_halls],
+        'display_name': ' + '.join(hall.event_type for hall in ordered_halls),
+    }
+
+
 def _build_combo_suggestions(selected_event_type_name, guest_count):
     if guest_count <= HALL_SINGLE_HALL_LIMIT:
         return []
@@ -848,6 +908,7 @@ def check_availability(request):
         return Response({'error': 'Date is required'}, status=status.HTTP_400_BAD_REQUEST)
     event_type_name = request.GET.get('event_type', '').strip()
     guest_count = _get_guest_count(request.GET.get('guest_count'))
+    selected_halls = _resolve_selected_halls(request.GET.getlist('selected_halls'), event_type_name)
     event_type_obj = EventType.objects.filter(event_type=event_type_name, is_active=True).first() if event_type_name else None
 
     requested_slot = request.GET.get('time_slot', 'morning')
@@ -874,6 +935,12 @@ def check_availability(request):
                 'time_slot': duplicate.time_slot,
             }
 
+    pricing_payload = (
+        _get_hall_combo_pricing(selected_halls, guest_count)
+        if len(selected_halls) > 1
+        else _get_pricing_payload(event_type_obj, guest_count)
+    )
+
     return Response({
         'total_slots': MAX_SLOTS,
         'morning': {
@@ -894,7 +961,7 @@ def check_availability(request):
             'morning_nearly_full': morning_count >= 4,
             'afternoon_nearly_full': afternoon_count >= 4,
         },
-        'pricing': _get_pricing_payload(event_type_obj, guest_count),
+        'pricing': pricing_payload,
         'combo_suggestions': _build_combo_suggestions(event_type_name, guest_count),
         'duplicate_booking': duplicate_info,
     })
@@ -1051,6 +1118,7 @@ def create_booking(request):
         data = request.data
         date = data.get('date')
         event_type = data.get('event_type')
+        selected_halls = _resolve_selected_halls(data.get('selected_halls'), event_type)
         capacity = data.get('capacity')
         description = data.get('description') or ''
         invited_emails = data.get('invited_emails') or ''
@@ -1149,7 +1217,17 @@ def create_booking(request):
             return Response({'message': 'Guest count must be at least 1.'}, status=status.HTTP_400_BAD_REQUEST)
 
         event_type_obj = EventType.objects.filter(event_type=event_type, is_active=True).first()
-        if guest_count > HALL_SINGLE_HALL_LIMIT:
+        combo_pricing = None
+        if len(selected_halls) > 1:
+            combo_pricing = _get_hall_combo_pricing(selected_halls, guest_count)
+            if not combo_pricing or len(combo_pricing['selected_halls']) != len(selected_halls):
+                return Response({'message': 'One or more selected halls are invalid or unavailable.'}, status=status.HTTP_400_BAD_REQUEST)
+            if guest_count > combo_pricing['max_capacity']:
+                return Response(
+                    {'message': f'The selected hall combination supports up to {combo_pricing["max_capacity"]} guests only.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif guest_count > HALL_SINGLE_HALL_LIMIT:
             combo_suggestions = _build_combo_suggestions(event_type, guest_count)
             return Response(
                 {
@@ -1165,14 +1243,17 @@ def create_booking(request):
 
         booking = Booking.objects.create(
             user=request.user,
-            event_type=event_type,
+            event_type=combo_pricing['display_name'] if combo_pricing else event_type,
             description=description,
             capacity=guest_count,
             date=date,
             time=data.get('time'),
             location="Ralphy's Venue, Basak San Nicolas Villa Kalubihan Cebu City 6000.",
             invited_emails=invited_emails,
-            event_details=event_details,
+            event_details={
+                **event_details,
+                'selected_halls': combo_pricing['selected_halls'] if combo_pricing else selected_halls,
+            },
             special_requests=special_requests,
             whole_day=whole_day,
             time_slot=time_slot,
@@ -1184,7 +1265,7 @@ def create_booking(request):
         )
 
         # Calculate total amount
-        booking.total_amount = Decimal(str(_get_pricing_payload(event_type_obj, guest_count)['total_amount']))
+        booking.total_amount = Decimal(str((combo_pricing or _get_pricing_payload(event_type_obj, guest_count))['total_amount']))
         booking.save()
         booking.refresh_from_db()  # ensure date/time are proper Python objects
         _record_booking_history(
@@ -1197,7 +1278,7 @@ def create_booking(request):
         # Notify all organizers about the new booking via WebSocket
         organizers = User.objects.filter(is_organizer=True, is_active=True)
         for org in organizers:
-            org_msg = f'New booking: {event_type} on {date} by {request.user.first_name} {request.user.last_name}'
+            org_msg = f'New booking: {booking.event_type} on {date} by {request.user.first_name} {request.user.last_name}'
             Notification.objects.create(user=org, message=org_msg)
             send_ws_notification(org.id, org_msg, notif_type='new_booking')
 
@@ -1244,7 +1325,7 @@ def create_booking(request):
             Payment.objects.create(
                 booking=booking,
                 event_id=booking.id,
-                event_name=event_type,
+                event_name=booking.event_type,
                 client_name=client_name,
                 payment_method=payment_method,
                 reference_number=reference_number,
@@ -1283,6 +1364,18 @@ def update_booking_status(request, booking_id):
         
         if new_status == 'declined' and not decline_reason:
             return Response({'message': 'Please provide a reason for declining.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if (
+            new_status == 'confirmed'
+            and booking.payment_method == 'GCash'
+            and booking.payment_status != 'paid'
+        ):
+            return Response(
+                {
+                    'message': 'GCash bookings can only be accepted after the client submits proof and you approve the payment.',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         
         previous_status = booking.status
         booking.status = new_status
@@ -1500,6 +1593,64 @@ def process_payment(request, booking_id):
         })
     except Booking.DoesNotExist:
         return Response({'message': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+def update_booking_payment_method(request, booking_id):
+    try:
+        booking = Booking.objects.get(id=booking_id, user=request.user)
+    except Booking.DoesNotExist:
+        return Response({'message': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if booking.payment_status == 'paid':
+        return Response({'message': 'Paid bookings can no longer change payment method.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    payment_method = (request.data.get('payment_method') or '').strip()
+    if payment_method not in ['Cash', 'GCash', 'QRPh']:
+        return Response({'message': 'Invalid payment method'}, status=status.HTTP_400_BAD_REQUEST)
+
+    previous_payment_method = booking.payment_method
+    previous_payment_status = booking.payment_status
+    booking.payment_method = payment_method
+
+    if payment_method == 'Cash':
+        booking.payment_status = 'paid'
+        if not Payment.objects.filter(booking=booking).exists():
+            Payment.objects.create(
+                booking=booking,
+                event_id=booking.id,
+                event_name=booking.event_type,
+                client_name=f'{booking.user.first_name} {booking.user.last_name}',
+                payment_method='Cash',
+                reference_number=f"PAY-{uuid.uuid4().hex[:12].upper()}",
+                amount=booking.total_amount,
+            )
+    else:
+        booking.payment_status = 'pending'
+        booking.payment_proof = None
+        booking.gcash_reference = ''
+
+    update_fields = ['payment_method', 'payment_status', 'payment_proof', 'gcash_reference']
+    if payment_method == 'Cash':
+        update_fields = ['payment_method', 'payment_status']
+    booking.save(update_fields=update_fields)
+
+    _record_booking_history(
+        booking,
+        from_status=previous_payment_status or booking.status,
+        to_status='payment_method_changed',
+        actor=request.user,
+        reason=f'Payment method changed from {previous_payment_method or "N/A"} to {payment_method}.',
+        metadata={'payment_status': booking.payment_status, 'payment_method': booking.payment_method},
+    )
+
+    return Response({
+        'message': 'Payment method updated successfully.',
+        'payment_method': booking.payment_method,
+        'payment_status': booking.payment_status,
+        'total_amount': float(booking.total_amount),
+    })
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -1934,8 +2085,8 @@ def upload_payment_proof(request, booking_id):
     try:
         booking = Booking.objects.get(id=booking_id, user=request.user)
         
-        if booking.status != 'confirmed':
-            return Response({'message': 'Payment proof can only be uploaded after the owner accepts your booking.'}, status=status.HTTP_400_BAD_REQUEST)
+        if booking.status not in ['pending', 'confirmed']:
+            return Response({'message': 'Payment proof can only be uploaded for active bookings.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if booking.payment_method != 'GCash':
             return Response({'message': 'Manual payment proof is only available for GCash bookings.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1982,7 +2133,7 @@ def upload_payment_proof(request, booking_id):
             send_ws_notification(org.id, proof_msg, notif_type='payment_proof')
 
         return Response({
-            'message': 'Payment proof uploaded successfully. Waiting for organizer verification.',
+            'message': 'Payment proof uploaded successfully. Waiting for organizer review before booking approval.',
             'booking_id': booking.id
         })
         
@@ -2498,9 +2649,20 @@ def verify_payment(request, booking_id):
         action = request.data.get('action')
         
         if action == 'approve':
+            if booking.payment_method != 'GCash':
+                return Response({'message': 'Manual proof verification is only available for GCash bookings.'}, status=status.HTTP_400_BAD_REQUEST)
+            if not booking.payment_proof or not booking.gcash_reference:
+                return Response({'message': 'Payment proof and GCash reference are required before approval.'}, status=status.HTTP_400_BAD_REQUEST)
+
             previous_payment_status = booking.payment_status
             booking.payment_status = 'paid'
-            booking.save()
+            previous_status = booking.status
+            update_fields = ['payment_status']
+            if booking.status != 'confirmed':
+                booking.status = 'confirmed'
+                booking.accepted_at = timezone.now()
+                update_fields.extend(['status', 'accepted_at'])
+            booking.save(update_fields=update_fields)
             _record_booking_history(
                 booking,
                 from_status=previous_payment_status or booking.status,
@@ -2524,8 +2686,23 @@ def verify_payment(request, booking_id):
                     'amount': booking.total_amount
                 }
             )
-            
-            return Response({'message': 'Payment verified and approved'})
+
+            if previous_status != 'confirmed':
+                _record_booking_history(
+                    booking,
+                    from_status=previous_status,
+                    to_status='confirmed',
+                    actor=request.user,
+                    reason='Booking confirmed after organizer approved the GCash proof.',
+                    metadata={'payment_status': booking.payment_status},
+                )
+                notif_msg = f'Your {booking.event_type} booking on {booking.date} has been confirmed after payment review!'
+                Notification.objects.create(user=booking.user, message=notif_msg)
+                send_ws_notification(booking.user.id, notif_msg, notif_type='booking_confirmed')
+                send_booking_status_email(booking.user.email, booking.user.first_name, booking, 'confirmed')
+                _send_invitation_emails(booking, confirmed=True)
+
+            return Response({'message': 'Payment verified. Booking confirmed.'})
         elif action == 'reject':
             previous_payment_status = booking.payment_status
             booking.payment_status = 'rejected'
@@ -2538,7 +2715,12 @@ def verify_payment(request, booking_id):
                 reason='Organizer rejected the uploaded payment proof.',
                 metadata={'payment_status': booking.payment_status},
             )
-            return Response({'message': 'Payment rejected'})
+            Notification.objects.create(
+                user=booking.user,
+                message=f'Your payment proof for {booking.event_type} on {booking.date} was rejected. Please upload a new proof and reference number.',
+            )
+            send_ws_notification(booking.user.id, 'Your uploaded payment proof was rejected. Please submit a new one.', notif_type='payment_rejected')
+            return Response({'message': 'Payment rejected. Client can upload a new proof.'})
         else:
             return Response({'message': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
             
