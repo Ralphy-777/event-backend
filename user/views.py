@@ -2753,20 +2753,32 @@ def verify_payment(request, booking_id):
                 metadata={'payment_status': booking.payment_status},
             )
             
-            reference_number = booking.gcash_reference or f"PAY-{uuid.uuid4().hex[:12].upper()}"
             client_name = f"{booking.user.first_name} {booking.user.last_name}"
-            
-            Payment.objects.get_or_create(
-                booking=booking,
-                defaults={
-                    'event_id': booking.id,
-                    'event_name': booking.event_type,
-                    'client_name': client_name,
-                    'payment_method': 'GCash',
-                    'reference_number': reference_number,
-                    'amount': booking.total_amount
-                }
-            )
+
+            existing_payment = Payment.objects.filter(booking=booking).first()
+            if existing_payment:
+                updates = []
+                if existing_payment.payment_method != 'GCash':
+                    existing_payment.payment_method = 'GCash'
+                    updates.append('payment_method')
+                if existing_payment.client_name != client_name:
+                    existing_payment.client_name = client_name
+                    updates.append('client_name')
+                if existing_payment.amount != booking.total_amount:
+                    existing_payment.amount = booking.total_amount
+                    updates.append('amount')
+                if updates:
+                    existing_payment.save(update_fields=updates)
+            else:
+                Payment.objects.create(
+                    booking=booking,
+                    event_id=booking.id,
+                    event_name=booking.event_type,
+                    client_name=client_name,
+                    payment_method='GCash',
+                    reference_number=f"PAY-{uuid.uuid4().hex[:12].upper()}",
+                    amount=booking.total_amount,
+                )
 
             return Response({'message': 'Payment verified and approved'})
         elif action == 'reject':
