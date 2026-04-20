@@ -1361,6 +1361,16 @@ def update_booking_status(request, booking_id):
         
         if new_status not in ['confirmed', 'declined']:
             return Response({'message': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if (
+            new_status == 'confirmed'
+            and booking.payment_method == 'GCash'
+            and booking.payment_status != 'paid'
+        ):
+            return Response(
+                {'message': 'Review and approve the GCash proof of payment first before accepting this booking.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         
         if new_status == 'declined' and not decline_reason:
             return Response({'message': 'Please provide a reason for declining.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -2072,15 +2082,12 @@ def upload_payment_proof(request, booking_id):
     """Upload GCash payment proof"""
     try:
         booking = Booking.objects.get(id=booking_id, user=request.user)
-        
-        if booking.status != 'confirmed':
-            return Response({'message': 'Payment proof can only be uploaded after the owner accepts your booking.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if booking.payment_method != 'GCash':
             return Response({'message': 'Manual payment proof is only available for GCash bookings.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if booking.payment_status == 'paid':
-            return Response({'message': 'Payment already confirmed'}, status=status.HTTP_400_BAD_REQUEST)
+        if booking.status in ['declined', 'cancelled']:
+            return Response({'message': 'You cannot upload payment proof for a declined or cancelled booking.'}, status=status.HTTP_400_BAD_REQUEST)
         
         payment_proof = request.FILES.get('payment_proof')
         gcash_reference = request.data.get('gcash_reference', '')
@@ -2094,7 +2101,7 @@ def upload_payment_proof(request, booking_id):
         # Check if fields exist before setting
         try:
             booking.payment_proof = payment_proof
-            booking.gcash_reference = gcash_reference
+            booking.gcash_reference = gcash_reference.strip()
         except AttributeError:
             return Response({
                 'message': 'Database not updated. Please run: setup_gcash_manual.bat',
@@ -2102,7 +2109,7 @@ def upload_payment_proof(request, booking_id):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         previous_payment_status = booking.payment_status
-        booking.payment_status = 'pending_verification'
+        booking.payment_status = 'paid' if previous_payment_status == 'paid' else 'pending_verification'
         booking.save()
         _record_booking_history(
             booking,
@@ -2110,7 +2117,11 @@ def upload_payment_proof(request, booking_id):
             to_status='payment_submitted',
             actor=request.user,
             reason='Payment proof uploaded for organizer verification.',
-            metadata={'payment_status': booking.payment_status, 'gcash_reference': gcash_reference},
+            metadata={
+                'payment_status': booking.payment_status,
+                'gcash_reference': booking.gcash_reference,
+                'paymongo_paid': previous_payment_status == 'paid',
+            },
         )
 
         # Notify organizers about payment proof
@@ -2121,7 +2132,9 @@ def upload_payment_proof(request, booking_id):
             send_ws_notification(org.id, proof_msg, notif_type='payment_proof')
 
         return Response({
-            'message': 'Payment proof uploaded successfully. Waiting for organizer verification.',
+            'message': 'Payment proof uploaded successfully.'
+            if previous_payment_status == 'paid'
+            else 'Payment proof uploaded successfully. Waiting for organizer verification.',
             'booking_id': booking.id
         })
         
