@@ -267,12 +267,17 @@ class DamageReportAdmin(admin.ModelAdmin):
     )
 
     def booking_link(self, obj):
+        if not obj.booking_id:
+            return 'Missing booking'
         return format_html('<a href="/admin/user/booking/{}/change/">Booking #{}</a>', obj.booking_id, obj.booking_id)
     booking_link.short_description = 'Booking'
 
     def client_name(self, obj):
-        u = obj.booking.user
-        return f'{u.first_name} {u.last_name}'.strip() or u.email
+        booking = getattr(obj, 'booking', None)
+        user = getattr(booking, 'user', None)
+        if not user:
+            return 'Unknown client'
+        return f'{user.first_name} {user.last_name}'.strip() or user.email
     client_name.short_description = 'Client'
 
     def status_badge(self, obj):

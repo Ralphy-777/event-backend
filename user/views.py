@@ -63,6 +63,20 @@ DEFAULT_HALL_BASE_PRICE = Decimal('5000')
 MAX_SLOTS = 5
 
 
+def _display_user_name(user, fallback='Unknown user'):
+    if not user:
+        return fallback
+    full_name = f'{user.first_name} {user.last_name}'.strip()
+    return full_name or getattr(user, 'email', '') or fallback
+
+
+def _payment_reference_for_booking(booking):
+    try:
+        return booking.payment.reference_number
+    except Payment.DoesNotExist:
+        return ''
+
+
 def _get_hall_base_price(event_type_obj):
     return Decimal(str(event_type_obj.price)) if event_type_obj else DEFAULT_HALL_BASE_PRICE
 
@@ -523,30 +537,34 @@ def _send_invitation_emails(booking, confirmed=False):
 
 @api_view(['GET'])
 def get_event_types(request):
-    event_types = EventType.objects.filter(is_active=True)
-    data = []
-    for et in event_types:
-        image = None
-        if et.image:
-            try:
-                image = request.build_absolute_uri(et.image.url)
-            except Exception:
-                image = None
-        elif et.image_url:
-            image = et.image_url
-        data.append({
-            'id': et.id,
-            'event_type': et.event_type,
-            'price': float(et.price),
-            'included_capacity': HALL_INCLUDED_CAPACITY,
-            'max_capacity': HALL_SINGLE_HALL_LIMIT,
-            'max_invited_emails': et.max_invited_emails,
-            'people_per_table': et.people_per_table,
-            'excess_person_fee': float(HALL_EXCESS_PERSON_FEE),
-            'description': et.description,
-            'image': image,
-        })
-    return Response(data)
+    try:
+        event_types = EventType.objects.filter(is_active=True)
+        data = []
+        for et in event_types:
+            image = None
+            if et.image:
+                try:
+                    image = request.build_absolute_uri(et.image.url)
+                except Exception:
+                    image = None
+            elif et.image_url:
+                image = et.image_url
+            data.append({
+                'id': et.id,
+                'event_type': et.event_type,
+                'price': float(et.price),
+                'included_capacity': HALL_INCLUDED_CAPACITY,
+                'max_capacity': HALL_SINGLE_HALL_LIMIT,
+                'max_invited_emails': et.max_invited_emails,
+                'people_per_table': et.people_per_table,
+                'excess_person_fee': float(HALL_EXCESS_PERSON_FEE),
+                'description': et.description,
+                'image': image,
+            })
+        return Response(data)
+    except Exception as e:
+        logger.exception('get_event_types error: %s', e)
+        return Response({'message': 'Failed to load hall types.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
@@ -946,40 +964,39 @@ def get_booking_reason_templates(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_bookings(request):
-    bookings = Booking.objects.all().prefetch_related('status_history')
-    data = []
-    for b in bookings:
-        payment_reference = ''
-        try:
-            payment_reference = b.payment.reference_number
-        except Payment.DoesNotExist:
-            payment_reference = ''
-        proof_url = None
-        if b.payment_proof:
-            try:
-                url = b.payment_proof.url
-                proof_url = url if url.startswith('http') else request.build_absolute_uri(url)
-            except Exception:
-                proof_url = str(b.payment_proof)
-        data.append({
-            'id': b.id,
-            'user': f"{b.user.first_name} {b.user.last_name}",
-            'event_type': b.event_type,
-            'capacity': b.capacity,
-            'date': b.date,
-            'time': b.time,
-            'status': b.status,
-            'payment_status': b.payment_status,
-            'gcash_reference': b.gcash_reference or '',
-            'payment_proof': proof_url,
-            'payment_method': b.payment_method,
-            'total_amount': float(b.total_amount),
-            'reference_number': payment_reference,
-            'decline_reason': b.decline_reason or '',
-            'cancel_reason': b.cancel_reason or '',
-            'status_history': _booking_status_history(b),
-        })
-    return Response(data)
+    try:
+        bookings = Booking.objects.all().select_related('user').prefetch_related('status_history')
+        data = []
+        for b in bookings:
+            proof_url = None
+            if b.payment_proof:
+                try:
+                    url = b.payment_proof.url
+                    proof_url = url if url.startswith('http') else request.build_absolute_uri(url)
+                except Exception:
+                    proof_url = str(b.payment_proof)
+            data.append({
+                'id': b.id,
+                'user': _display_user_name(b.user),
+                'event_type': b.event_type,
+                'capacity': b.capacity,
+                'date': b.date,
+                'time': b.time,
+                'status': b.status,
+                'payment_status': b.payment_status,
+                'gcash_reference': b.gcash_reference or '',
+                'payment_proof': proof_url,
+                'payment_method': b.payment_method,
+                'total_amount': float(b.total_amount),
+                'reference_number': _payment_reference_for_booking(b),
+                'decline_reason': b.decline_reason or '',
+                'cancel_reason': b.cancel_reason or '',
+                'status_history': _booking_status_history(b),
+            })
+        return Response(data)
+    except Exception as e:
+        logger.exception('get_bookings error: %s', e)
+        return Response({'message': 'Failed to load bookings.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -988,11 +1005,6 @@ def get_my_bookings(request):
         bookings = Booking.objects.filter(user=request.user).prefetch_related('status_history')
         data = []
         for b in bookings:
-            payment_reference = ''
-            try:
-                payment_reference = b.payment.reference_number
-            except Payment.DoesNotExist:
-                payment_reference = ''
             booking_data = {
                 'id': b.id,
                 'event_type': b.event_type,
@@ -1005,7 +1017,7 @@ def get_my_bookings(request):
                 'payment_status': b.payment_status,
                 'payment_method': b.payment_method,
                 'total_amount': float(b.total_amount),
-                'reference_number': payment_reference,
+                'reference_number': _payment_reference_for_booking(b),
                 'created_at': b.created_at.isoformat(),
                 'event_details': b.event_details,
                 'gcash_reference': b.gcash_reference or '',
@@ -2145,27 +2157,31 @@ def submit_review(request):
 
 @api_view(['GET'])
 def get_reviews(request):
-    reviews = Review.objects.select_related('user', 'booking').prefetch_related('replies__user').all()
-    data = []
-    for r in reviews:
-        replies = [{
-            'id': rp.id,
-            'user_id': rp.user.id,
-            'user': f"{rp.user.first_name} {rp.user.last_name}",
-            'is_organizer': rp.user.is_organizer,
-            'comment': rp.comment,
-            'created_at': rp.created_at.isoformat(),
-        } for rp in r.replies.all()]
-        data.append({
-            'id': r.id,
-            'user': f"{r.user.first_name} {r.user.last_name}",
-            'rating': r.rating,
-            'comment': r.comment,
-            'event_type': r.booking.event_type if r.booking else None,
-            'created_at': r.created_at.isoformat(),
-            'replies': replies,
-        })
-    return Response(data)
+    try:
+        reviews = Review.objects.select_related('user', 'booking').prefetch_related('replies__user').all()
+        data = []
+        for r in reviews:
+            replies = [{
+                'id': rp.id,
+                'user_id': rp.user.id,
+                'user': _display_user_name(rp.user),
+                'is_organizer': rp.user.is_organizer,
+                'comment': rp.comment,
+                'created_at': rp.created_at.isoformat(),
+            } for rp in r.replies.all()]
+            data.append({
+                'id': r.id,
+                'user': _display_user_name(r.user, r.guest_email or 'Anonymous reviewer'),
+                'rating': r.rating,
+                'comment': r.comment,
+                'event_type': r.booking.event_type if r.booking else None,
+                'created_at': r.created_at.isoformat(),
+                'replies': replies,
+            })
+        return Response(data)
+    except Exception as e:
+        logger.exception('get_reviews error: %s', e)
+        return Response({'message': 'Failed to load reviews.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
@@ -2379,23 +2395,72 @@ def mark_contact_read(request, message_id):
 @permission_classes([IsAuthenticated])
 def get_calendar_bookings(request):
     """Return confirmed bookings for a given month for the calendar view."""
-    year = request.GET.get('year', datetime.now().year)
-    month = request.GET.get('month', datetime.now().month)
-    bookings = Booking.objects.filter(
-        status='confirmed',
-        date__year=year,
-        date__month=month,
-    ).select_related('user')
-    data = [{
-        'id': b.id,
-        'event_type': b.event_type,
-        'date': str(b.date),
-        'time': str(b.time) if b.time else None,
-        'user': f'{b.user.first_name} {b.user.last_name}',
-        'capacity': b.capacity,
-        'whole_day': b.whole_day,
-    } for b in bookings]
-    return Response(data)
+    try:
+        year = int(request.GET.get('year', datetime.now().year))
+        month = int(request.GET.get('month', datetime.now().month))
+    except (TypeError, ValueError):
+        return Response({'message': 'Invalid calendar month or year.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        bookings = Booking.objects.filter(
+            status='confirmed',
+            date__year=year,
+            date__month=month,
+        ).select_related('user')
+        data = [{
+            'id': b.id,
+            'event_type': b.event_type,
+            'date': str(b.date),
+            'time': str(b.time) if b.time else None,
+            'user': _display_user_name(b.user),
+            'capacity': b.capacity,
+            'whole_day': b.whole_day,
+        } for b in bookings]
+        return Response(data)
+    except Exception as e:
+        logger.exception('get_calendar_bookings error: %s', e)
+        return Response({'message': 'Failed to load calendar bookings.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_booking_extensions(request):
+    if not request.user.is_organizer:
+        return Response({'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+
+    # Booking extensions were removed in migration 0045, but the frontend still requests this endpoint.
+    return Response([])
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def request_booking_extension(request, booking_id):
+    if request.user.is_organizer:
+        return Response({'message': 'Only clients can request extensions.'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        Booking.objects.get(id=booking_id, user=request.user)
+    except Booking.DoesNotExist:
+        return Response({'message': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    return Response(
+        {'message': 'Booking extensions are currently unavailable.', 'extension_fee': 0},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def handle_booking_extension(request, booking_id):
+    if not request.user.is_organizer:
+        return Response({'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        Booking.objects.get(id=booking_id)
+    except Booking.DoesNotExist:
+        return Response({'message': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    return Response({'message': 'Booking extensions are currently unavailable.'}, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(['GET'])
@@ -2429,51 +2494,55 @@ def test_email(request):
 def get_damages(request):
     if not request.user.is_organizer:
         return Response({'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
-    from .models import DamageReport
-    reports = DamageReport.objects.select_related('booking', 'booking__user', 'reported_by').all()
-    reports_data = []
-    for r in reports:
-        photo_url = None
-        if r.photo:
-            try:
-                url = r.photo.url
-                photo_url = url if url.startswith('http') else request.build_absolute_uri(url)
-            except Exception:
-                photo_url = str(r.photo)
-        reports_data.append({
-            'id': r.id,
-            'booking_id': r.booking_id,
-            'booking_event_type': r.booking.event_type,
-            'booking_date': str(r.booking.date),
-            'client_name': f'{r.booking.user.first_name} {r.booking.user.last_name}',
-            'item_type': r.item_type,
-            'item_name': r.item_name,
-            'quantity': r.quantity,
-            'estimated_cost': float(r.estimated_cost),
-            'recovered_amount': float(r.recovered_amount),
-            'net_loss': float(r.estimated_cost - r.recovered_amount),
-            'charge_to_client': r.charge_to_client,
-            'status': r.status,
-            'notes': r.notes,
-            'photo': photo_url,
-            'reported_by': r.reported_by.get_full_name() if r.reported_by else None,
-            'created_at': r.created_at.isoformat(),
-            'updated_at': r.updated_at.isoformat(),
-        })
-    total_damage = sum(float(r.estimated_cost) for r in reports)
-    total_recovered = sum(float(r.recovered_amount) for r in reports)
-    gross_revenue = float(Booking.objects.filter(payment_status='paid').aggregate(
-        total=__import__('django.db.models', fromlist=['Sum']).Sum('total_amount')
-    )['total'] or 0)
-    summary = {
-        'gross_revenue': gross_revenue,
-        'total_damage_cost': total_damage,
-        'total_recovered': total_recovered,
-        'total_net_loss': total_damage - total_recovered,
-        'net_profit': gross_revenue - (total_damage - total_recovered),
-        'damage_reports_count': reports.count(),
-    }
-    return Response({'reports': reports_data, 'summary': summary})
+    try:
+        from .models import DamageReport
+        reports = DamageReport.objects.select_related('booking', 'booking__user', 'reported_by').all()
+        reports_data = []
+        for r in reports:
+            photo_url = None
+            if r.photo:
+                try:
+                    url = r.photo.url
+                    photo_url = url if url.startswith('http') else request.build_absolute_uri(url)
+                except Exception:
+                    photo_url = str(r.photo)
+            reports_data.append({
+                'id': r.id,
+                'booking_id': r.booking_id,
+                'booking_event_type': r.booking.event_type if r.booking else '',
+                'booking_date': str(r.booking.date) if r.booking and r.booking.date else '',
+                'client_name': _display_user_name(r.booking.user if r.booking else None, 'Unknown client'),
+                'item_type': r.item_type,
+                'item_name': r.item_name,
+                'quantity': r.quantity,
+                'estimated_cost': float(r.estimated_cost),
+                'recovered_amount': float(r.recovered_amount),
+                'net_loss': float(r.estimated_cost - r.recovered_amount),
+                'charge_to_client': r.charge_to_client,
+                'status': r.status,
+                'notes': r.notes,
+                'photo': photo_url,
+                'reported_by': _display_user_name(r.reported_by, None),
+                'created_at': r.created_at.isoformat(),
+                'updated_at': r.updated_at.isoformat(),
+            })
+        total_damage = sum(float(r.estimated_cost) for r in reports)
+        total_recovered = sum(float(r.recovered_amount) for r in reports)
+        gross_revenue = float(Booking.objects.filter(payment_status='paid').aggregate(
+            total=__import__('django.db.models', fromlist=['Sum']).Sum('total_amount')
+        )['total'] or 0)
+        summary = {
+            'gross_revenue': gross_revenue,
+            'total_damage_cost': total_damage,
+            'total_recovered': total_recovered,
+            'total_net_loss': total_damage - total_recovered,
+            'net_profit': gross_revenue - (total_damage - total_recovered),
+            'damage_reports_count': reports.count(),
+        }
+        return Response({'reports': reports_data, 'summary': summary})
+    except Exception as e:
+        logger.exception('get_damages error: %s', e)
+        return Response({'message': 'Failed to load damages.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
