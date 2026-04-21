@@ -13,7 +13,7 @@ from .models import (
     Notification,
     ContactMessage,
     BookingStatusHistory,
-    LandingCarouselImage, BookingExtension,
+    LandingCarouselImage,
     HALL_INCLUDED_CAPACITY,
     HALL_SINGLE_HALL_LIMIT,
     HALL_EXCESS_PERSON_FEE,
@@ -186,27 +186,6 @@ def _build_combo_suggestions(selected_event_type_name, guest_count):
                 break
 
     return suggestions
-
-
-def _calculate_booking_end_time(booking_date, booking_time):
-    if not booking_date or not booking_time:
-        return None
-    if isinstance(booking_date, str):
-        try:
-            booking_date = datetime.strptime(booking_date, '%Y-%m-%d').date()
-        except ValueError:
-            return None
-    if isinstance(booking_time, str):
-        booking_time = booking_time.strip()
-        for time_format in ('%H:%M:%S', '%H:%M'):
-            try:
-                booking_time = datetime.strptime(booking_time, time_format).time()
-                break
-            except ValueError:
-                continue
-        if isinstance(booking_time, str):
-            return None
-    return timezone.make_aware(datetime.combine(booking_date, booking_time)) + timedelta(hours=8)
 
 
 def _serialize_status_history_entry(entry):
@@ -446,40 +425,6 @@ def _send_booking_reminders():
 
 
 
-def _check_end_time_notifications():
-    """Send notifications to clients whose booking end time is approaching."""
-    from django.utils import timezone as tz
-    now = tz.now()
-    # 1-hour warning
-    bookings_1h = Booking.objects.filter(
-        status='confirmed',
-        end_time__isnull=False,
-        extension_notified_1h=False,
-        end_time__lte=now + __import__('datetime').timedelta(hours=1),
-        end_time__gt=now,
-    ).select_related('user')
-    for booking in bookings_1h:
-        msg = f'Your {booking.event_type} booking ends in 1 hour! You can request a {booking.extension_hours if hasattr(booking, "extension_hours") else 3}-hour extension if needed.'
-        Notification.objects.create(user=booking.user, message=msg)
-        send_ws_notification(booking.user.id, msg, notif_type='end_time_warning_1h')
-        booking.extension_notified_1h = True
-        booking.save(update_fields=['extension_notified_1h'])
-
-    # 30-minute warning
-    bookings_30m = Booking.objects.filter(
-        status='confirmed',
-        end_time__isnull=False,
-        extension_notified_30m=False,
-        end_time__lte=now + __import__('datetime').timedelta(minutes=30),
-        end_time__gt=now,
-    ).select_related('user')
-    for booking in bookings_30m:
-        msg = f'Your {booking.event_type} booking ends in 30 minutes!'
-        Notification.objects.create(user=booking.user, message=msg)
-        send_ws_notification(booking.user.id, msg, notif_type='end_time_warning_30m')
-        booking.extension_notified_30m = True
-        booking.save(update_fields=['extension_notified_30m'])
-
 # ── Payment deadline checker (runs every hour) ──────────────────────────────
 def _start_deadline_checker():
     def _run():
@@ -487,10 +432,9 @@ def _start_deadline_checker():
         while True:
             try:
                 _check_payment_deadlines()
-                _check_end_time_notifications()
             except Exception as e:
                 logger.exception('Deadline checker error: %s', e)
-            time.sleep(1800)  # check every 30 minutes
+            time.sleep(3600)
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -1049,14 +993,6 @@ def get_my_bookings(request):
                 payment_reference = b.payment.reference_number
             except Payment.DoesNotExist:
                 payment_reference = ''
-            extension_data = None
-            if hasattr(b, 'extension'):
-                extension_data = {
-                    'status': b.extension.status,
-                    'extension_hours': b.extension.extension_hours,
-                    'extension_fee': float(b.extension.extension_fee),
-                    'created_at': b.extension.created_at.isoformat(),
-                }
             booking_data = {
                 'id': b.id,
                 'event_type': b.event_type,
@@ -1071,8 +1007,6 @@ def get_my_bookings(request):
                 'total_amount': float(b.total_amount),
                 'reference_number': payment_reference,
                 'created_at': b.created_at.isoformat(),
-                'end_time': b.end_time.isoformat() if b.end_time else None,
-                'is_extended': b.is_extended,
                 'event_details': b.event_details,
                 'gcash_reference': b.gcash_reference or '',
                 'payment_proof': str(b.payment_proof) if b.payment_proof else None,
@@ -1083,7 +1017,6 @@ def get_my_bookings(request):
                 'cancel_reason': b.cancel_reason or '',
                 'status_history': _booking_status_history(b),
                 'has_review': b.reviews.filter(user=request.user).exists(),
-                'extension': extension_data,
             }
             data.append(booking_data)
         
@@ -1261,7 +1194,6 @@ def create_booking(request):
             payment_status='paid',
             payment_method=payment_method,
             payment_deadline=timezone.now() + timedelta(days=3),
-            end_time=_calculate_booking_end_time(booking_date, data.get('time')),
         )
 
         # Calculate total amount
@@ -1546,7 +1478,6 @@ def update_booking(request, booking_id):
         if new_time:
             booking.time = new_time
         booking.time_slot = new_time_slot
-        booking.end_time = _calculate_booking_end_time(booking.date, booking.time)
         booking.save()
         return Response({
             'message': 'Booking updated successfully',
@@ -2492,118 +2423,6 @@ def test_email(request):
             'bridge_url': settings.EMAIL_BRIDGE_URL,
             'has_bridge_secret': bool(settings.EMAIL_BRIDGE_SECRET),
         }, status=500)
-
-
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def request_extension(request, booking_id):
-    try:
-        booking = Booking.objects.get(id=booking_id, user=request.user)
-    except Booking.DoesNotExist:
-        return Response({'message': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
-
-    if booking.status != 'confirmed':
-        return Response({'message': 'Only confirmed bookings can be extended.'}, status=status.HTTP_400_BAD_REQUEST)
-
-    if booking.is_extended:
-        return Response({'message': 'This booking has already been extended once.'}, status=status.HTTP_400_BAD_REQUEST)
-
-    if hasattr(booking, 'extension') and booking.extension.status == 'pending':
-        return Response({'message': 'Extension request already submitted. Waiting for owner approval.'}, status=status.HTTP_400_BAD_REQUEST)
-
-    try:
-        event_type_obj = EventType.objects.get(event_type=booking.event_type, is_active=True)
-        ext_fee = event_type_obj.extension_fee
-        ext_hours = event_type_obj.extension_hours
-    except EventType.DoesNotExist:
-        ext_fee = 0
-        ext_hours = 3
-
-    BookingExtension.objects.update_or_create(
-        booking=booking,
-        defaults={
-            'requested_by': request.user,
-            'extension_hours': ext_hours,
-            'extension_fee': ext_fee,
-            'status': 'pending',
-        }
-    )
-
-    organizers = User.objects.filter(is_organizer=True, is_active=True)
-    for org in organizers:
-        msg = f'{request.user.first_name} {request.user.last_name} requested a {ext_hours}-hour extension for {booking.event_type} booking on {booking.date}.'
-        Notification.objects.create(user=org, message=msg)
-        send_ws_notification(org.id, msg, notif_type='extension_requested')
-
-    return Response({
-        'message': 'Extension request submitted. Waiting for owner approval.',
-        'extension_fee': float(ext_fee),
-        'extension_hours': ext_hours,
-    }, status=status.HTTP_201_CREATED)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def handle_extension(request, booking_id):
-    if not request.user.is_organizer:
-        return Response({'message': 'Only owners can approve/decline extensions.'}, status=status.HTTP_403_FORBIDDEN)
-
-    try:
-        booking = Booking.objects.get(id=booking_id)
-        ext = booking.extension
-    except Booking.DoesNotExist:
-        return Response({'message': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
-    except BookingExtension.DoesNotExist:
-        return Response({'message': 'No extension request found.'}, status=status.HTTP_404_NOT_FOUND)
-
-    action = request.data.get('action')
-    if action not in ['approve', 'decline']:
-        return Response({'message': 'Invalid action.'}, status=status.HTTP_400_BAD_REQUEST)
-
-    ext.status = 'approved' if action == 'approve' else 'declined'
-    ext.save()
-
-    if action == 'approve':
-        from datetime import timedelta
-        booking.is_extended = True
-        if booking.end_time:
-            booking.end_time = booking.end_time + timedelta(hours=ext.extension_hours)
-        booking.total_amount = booking.total_amount + ext.extension_fee
-        booking.save(update_fields=['is_extended', 'end_time', 'total_amount'])
-        msg = f'Your extension request for {booking.event_type} on {booking.date} has been approved! +{ext.extension_hours} hours added. Additional fee: ₱{ext.extension_fee}.'
-        notif_type = 'extension_approved'
-    else:
-        msg = f'Your extension request for {booking.event_type} on {booking.date} was declined.'
-        notif_type = 'extension_declined'
-
-    Notification.objects.create(user=booking.user, message=msg)
-    send_ws_notification(booking.user.id, msg, notif_type=notif_type)
-
-    return Response({'message': f'Extension {ext.status}.'})
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def get_extension_requests(request):
-    if not request.user.is_organizer:
-        return Response({'message': 'Only owners can view extension requests.'}, status=status.HTTP_403_FORBIDDEN)
-
-    extensions = BookingExtension.objects.select_related('booking', 'booking__user').filter(status='pending')
-    data = [{
-        'id': e.id,
-        'booking_id': e.booking_id,
-        'event_type': e.booking.event_type,
-        'date': str(e.booking.date),
-        'client': f'{e.booking.user.first_name} {e.booking.user.last_name}',
-        'extension_hours': e.extension_hours,
-        'extension_fee': float(e.extension_fee),
-        'status': e.status,
-        'end_time': e.booking.end_time.isoformat() if e.booking.end_time else None,
-        'created_at': e.created_at.isoformat(),
-    } for e in extensions]
-    return Response(data)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])

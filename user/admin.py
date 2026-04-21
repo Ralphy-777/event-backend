@@ -5,7 +5,7 @@ from django.utils.html import format_html
 from .models import (
     User, Booking, Payment, EventType,
     Review, ReviewReply, Notification, ContactMessage, BookingStatusHistory, EmailDeliveryLog,
-    LandingCarouselImage, DamageReport, BookingExtension, DamageCatalogItem, DamageReportLineItem,
+    LandingCarouselImage, DamageReport, DamageCatalogItem, DamageReportLineItem,
 )
 
 # organizer_site kept for backward compat with urls.py import
@@ -184,7 +184,7 @@ class EventTypeAdmin(admin.ModelAdmin):
     fieldsets = (
         ('Basic Info',         {'fields': ('event_type', 'description', 'is_active')}),
         ('Image',              {'fields': ('image', 'image_url', 'image_preview')}),
-        ('Pricing & Capacity', {'fields': ('price', 'regular_table_price', 'presidential_table_price', 'max_capacity', 'people_per_table', 'max_invited_emails', 'extension_fee', 'extension_hours')}),
+        ('Pricing & Capacity', {'fields': ('price', 'regular_table_price', 'presidential_table_price', 'max_capacity', 'people_per_table', 'max_invited_emails')}),
         ('Timestamps',         {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
     )
 
@@ -379,31 +379,4 @@ class ContactMessageAdmin(admin.ModelAdmin):
         return _badge('Replied', '#10b981') if obj.reply else _badge('Pending', '#94a3b8')
     replied_badge.short_description = 'Reply'
 
-@admin.register(BookingExtension)
-class BookingExtensionAdmin(admin.ModelAdmin):
-    list_display  = ['id', 'booking_link', 'client_name', 'extension_hours', 'extension_fee', 'status_badge', 'created_at']
-    list_filter   = ['status', 'created_at']
-    search_fields = ['booking__user__email', 'booking__event_type']
-    ordering      = ['-created_at']
-    readonly_fields = ['created_at', 'updated_at']
-
-    fieldsets = (
-        ('Booking', {'fields': ('booking', 'requested_by')}),
-        ('Extension', {'fields': ('extension_hours', 'extension_fee', 'status')}),
-        ('Timestamps', {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
-    )
-
-    def booking_link(self, obj):
-        return format_html('<a href="/admin/user/booking/{}/change/">Booking #{}</a>', obj.booking_id, obj.booking_id)
-    booking_link.short_description = 'Booking'
-
-    def client_name(self, obj):
-        u = obj.booking.user
-        return f'{u.first_name} {u.last_name}'.strip() or u.email
-    client_name.short_description = 'Client'
-
-    def status_badge(self, obj):
-        colors = {'pending': '#f59e0b', 'approved': '#10b981', 'declined': '#ef4444'}
-        return _badge(obj.get_status_display(), colors.get(obj.status, '#64748b'))
-    status_badge.short_description = 'Status'
 
