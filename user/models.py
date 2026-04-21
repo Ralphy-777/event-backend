@@ -43,6 +43,8 @@ class EventType(models.Model):
     max_capacity = models.IntegerField(default=50)
     max_invited_emails = models.IntegerField(default=50)
     people_per_table = models.IntegerField(default=5)
+    regular_table_price = models.DecimalField(max_digits=10, decimal_places=2, default=100)
+    presidential_table_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     description = models.TextField(blank=True)
     image = models.ImageField(upload_to='event_types/', null=True, blank=True)
     image_url = models.URLField(max_length=500, blank=True, help_text='Paste an image URL (use this on Render instead of uploading)')
@@ -248,6 +250,54 @@ class DamageReport(models.Model):
     def __str__(self):
         item = self.item_name or self.get_item_type_display()
         return f'Damage #{self.id} - {item} for Booking #{self.booking_id}'
+
+
+class DamageCatalogItem(models.Model):
+    ITEM_TYPES = [
+        ('chair', 'Chair'),
+        ('table', 'Table'),
+        ('glassware', 'Glassware'),
+        ('utensil', 'Utensil'),
+        ('decor', 'Decor'),
+        ('equipment', 'Equipment'),
+        ('other', 'Other'),
+    ]
+
+    item_type = models.CharField(max_length=30, choices=ITEM_TYPES, default='other')
+    name = models.CharField(max_length=150, unique=True)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='damage_catalog_items_created')
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='damage_catalog_items_updated')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['item_type', 'name']
+        verbose_name = 'Damage Catalog Item'
+        verbose_name_plural = 'Damage Catalog Items'
+
+    def __str__(self):
+        return f'{self.name} - \u20b1{self.unit_price}'
+
+
+class DamageReportLineItem(models.Model):
+    report = models.ForeignKey(DamageReport, on_delete=models.CASCADE, related_name='line_items')
+    catalog_item = models.ForeignKey(DamageCatalogItem, on_delete=models.SET_NULL, null=True, blank=True, related_name='report_items')
+    item_type = models.CharField(max_length=30, default='other')
+    item_name = models.CharField(max_length=150)
+    quantity = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    total_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+        verbose_name = 'Damage Report Line Item'
+        verbose_name_plural = 'Damage Report Line Items'
+
+    def __str__(self):
+        return f'{self.item_name} x{self.quantity}'
 
 
 class Review(models.Model):

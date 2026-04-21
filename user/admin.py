@@ -5,7 +5,7 @@ from django.utils.html import format_html
 from .models import (
     User, Booking, Payment, EventType,
     Review, ReviewReply, Notification, ContactMessage, BookingStatusHistory, EmailDeliveryLog,
-    LandingCarouselImage, DamageReport, BookingExtension,
+    LandingCarouselImage, DamageReport, BookingExtension, DamageCatalogItem, DamageReportLineItem,
 )
 
 # organizer_site kept for backward compat with urls.py import
@@ -184,7 +184,7 @@ class EventTypeAdmin(admin.ModelAdmin):
     fieldsets = (
         ('Basic Info',         {'fields': ('event_type', 'description', 'is_active')}),
         ('Image',              {'fields': ('image', 'image_url', 'image_preview')}),
-        ('Pricing & Capacity', {'fields': ('price', 'max_capacity', 'people_per_table', 'max_invited_emails', 'extension_fee', 'extension_hours')}),
+        ('Pricing & Capacity', {'fields': ('price', 'regular_table_price', 'presidential_table_price', 'max_capacity', 'people_per_table', 'max_invited_emails', 'extension_fee', 'extension_hours')}),
         ('Timestamps',         {'fields': ('created_at', 'updated_at'), 'classes': ('collapse',)}),
     )
 
@@ -234,6 +234,21 @@ class LandingCarouselImageAdmin(admin.ModelAdmin):
 
 
 
+
+@admin.register(DamageCatalogItem)
+class DamageCatalogItemAdmin(admin.ModelAdmin):
+    list_display = ['name', 'item_type', 'unit_price', 'is_active', 'updated_at']
+    list_filter = ['item_type', 'is_active']
+    search_fields = ['name']
+    ordering = ['item_type', 'name']
+    readonly_fields = ['created_at', 'updated_at', 'created_by', 'updated_by']
+
+
+class DamageReportLineItemInline(admin.TabularInline):
+    model = DamageReportLineItem
+    extra = 0
+
+
 @admin.register(DamageReport)
 class DamageReportAdmin(admin.ModelAdmin):
     list_display  = ['id', 'booking_link', 'client_name', 'item_type', 'item_name', 'quantity', 'estimated_cost', 'recovered_amount', 'status_badge', 'charge_to_client', 'created_at']
@@ -241,6 +256,7 @@ class DamageReportAdmin(admin.ModelAdmin):
     search_fields = ['booking__user__email', 'item_name', 'notes']
     ordering      = ['-created_at']
     readonly_fields = ['created_at', 'updated_at', 'photo_preview']
+    inlines = [DamageReportLineItemInline]
 
     fieldsets = (
         ('Booking Info', {'fields': ('booking', 'reported_by')}),
