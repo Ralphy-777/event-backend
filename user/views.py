@@ -14,6 +14,9 @@ from .models import (
     ContactMessage,
     BookingStatusHistory,
     LandingCarouselImage,
+    DamageCatalogItem,
+    DamageReport,
+    DamageReportLineItem,
     HALL_INCLUDED_CAPACITY,
     HALL_SINGLE_HALL_LIMIT,
     HALL_EXCESS_PERSON_FEE,
@@ -23,7 +26,7 @@ from django.conf import settings
 from .mailer import (
     send_verification_email, send_password_reset_email, send_email_change_verification,
     send_booking_confirmation_email, send_booking_status_email, send_guest_invitation_email,
-    send_cancellation_email, send_payment_confirmed_email, send_html_email,
+    send_cancellation_email, send_payment_confirmed_email, send_html_email, send_damage_report_email,
 )
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
@@ -40,6 +43,7 @@ import string
 import threading
 import sys
 from decimal import Decimal
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +79,61 @@ def _payment_reference_for_booking(booking):
         return booking.payment.reference_number
     except Payment.DoesNotExist:
         return ''
+
+
+def _serialize_damage_catalog_item(item):
+    return {
+        'id': item.id,
+        'item_type': item.item_type,
+        'name': item.name,
+        'unit_price': float(item.unit_price),
+        'is_active': item.is_active,
+    }
+
+
+def _serialize_damage_report(report, request=None):
+    photo_url = None
+    if report.photo:
+        try:
+            url = report.photo.url
+            if request is not None and not url.startswith('http'):
+                photo_url = request.build_absolute_uri(url)
+            else:
+                photo_url = url
+        except Exception:
+            photo_url = str(report.photo)
+
+    items = [{
+        'id': item.id,
+        'catalog_item_id': item.catalog_item_id,
+        'item_type': item.item_type,
+        'item_name': item.item_name,
+        'quantity': item.quantity,
+        'unit_price': float(item.unit_price),
+        'total_price': float(item.total_price),
+    } for item in report.line_items.all()]
+
+    return {
+        'id': report.id,
+        'booking_id': report.booking_id,
+        'booking_event_type': report.booking.event_type if report.booking else '',
+        'booking_date': str(report.booking.date) if report.booking and report.booking.date else '',
+        'client_name': _display_user_name(report.booking.user if report.booking else None, 'Unknown client'),
+        'item_type': report.item_type,
+        'item_name': report.item_name,
+        'quantity': report.quantity,
+        'estimated_cost': float(report.estimated_cost),
+        'recovered_amount': float(report.recovered_amount),
+        'net_loss': float(report.estimated_cost - report.recovered_amount),
+        'charge_to_client': report.charge_to_client,
+        'status': report.status,
+        'notes': report.notes,
+        'photo': photo_url,
+        'reported_by': _display_user_name(report.reported_by, None),
+        'created_at': report.created_at.isoformat(),
+        'updated_at': report.updated_at.isoformat(),
+        'items': items,
+    }
 
 
 def _get_hall_base_price(event_type_obj):
@@ -401,7 +460,7 @@ def _send_booking_reminders():
         send_ws_notification(booking.user.id, msg, notif_type='reminder_24h')
         event_time_str = booking.time.strftime('%I:%M %p') if hasattr(booking.time, 'strftime') else (str(booking.time) if booking.time else 'Whole Day')
         send_html_email(
-            subject='EventPro — Your Event is Tomorrow!',
+            subject='SpacioGrande — Your Event is Tomorrow!',
             html_body=(
                 f'<h1 style="color:#fff;font-size:22px;font-weight:900;margin:0 0 8px;">Your Event is Tomorrow! 🎉</h1>'
                 f'<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 16px;">Hi <strong style="color:#e2e8f0;">{booking.user.first_name}</strong>, just a reminder about your upcoming event.</p>'
@@ -413,7 +472,7 @@ def _send_booking_reminders():
                 f'</table>'
             ),
             recipient_list=[booking.user.email],
-            plain_text=f'Hi {booking.user.first_name},\n\nReminder: Your {booking.event_type} is tomorrow ({booking.date}) at {event_time_str}.\nVenue: {booking.location}\n\n— EventPro Team',
+            plain_text=f'Hi {booking.user.first_name},\n\nReminder: Your {booking.event_type} is tomorrow ({booking.date}) at {event_time_str}.\nVenue: {booking.location}\n\n— SpacioGrande Team',
         )
         booking.reminder_sent = True
         booking.save(update_fields=['reminder_sent'])
@@ -493,7 +552,7 @@ def _check_payment_deadlines():
         Notification.objects.create(user=booking.user, message=msg)
         send_ws_notification(booking.user.id, msg, notif_type='booking_declined')
         send_html_email(
-            subject='EventPro — Booking Auto-Declined (Payment Deadline)',
+            subject='SpacioGrande — Booking Auto-Declined (Payment Deadline)',
             html_body=(
                 f'<h1 style="color:#fff;font-size:22px;font-weight:900;margin:0 0 8px;">Booking Auto-Declined</h1>'
                 f'<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 16px;">Hi <strong style="color:#e2e8f0;">{booking.user.first_name}</strong>, your booking was automatically declined because payment was not submitted within 3 days.</p>'
@@ -505,7 +564,7 @@ def _check_payment_deadlines():
                 f'<p style="color:#94a3b8;font-size:14px;">Please create a new booking and complete payment promptly.</p>'
             ),
             recipient_list=[booking.user.email],
-            plain_text=f'Hi {booking.user.first_name},\n\nYour {booking.event_type} booking on {booking.date} was auto-declined due to missed payment deadline.\n\n— EventPro Team',
+            plain_text=f'Hi {booking.user.first_name},\n\nYour {booking.event_type} booking on {booking.date} was auto-declined due to missed payment deadline.\n\n— SpacioGrande Team',
         )
 
 if _should_start_background_workers():
@@ -1002,9 +1061,10 @@ def get_bookings(request):
 @permission_classes([IsAuthenticated])
 def get_my_bookings(request):
     try:
-        bookings = Booking.objects.filter(user=request.user).prefetch_related('status_history')
+        bookings = Booking.objects.filter(user=request.user).prefetch_related('status_history', 'damage_reports__line_items')
         data = []
         for b in bookings:
+            damage_reports = [_serialize_damage_report(report, request) for report in b.damage_reports.all()]
             booking_data = {
                 'id': b.id,
                 'event_type': b.event_type,
@@ -1029,6 +1089,9 @@ def get_my_bookings(request):
                 'cancel_reason': b.cancel_reason or '',
                 'status_history': _booking_status_history(b),
                 'has_review': b.reviews.filter(user=request.user).exists(),
+                'damage_reports': damage_reports,
+                'damage_count': len(damage_reports),
+                'damage_total_cost': sum(float(report.get('estimated_cost', 0) or 0) for report in damage_reports),
             }
             data.append(booking_data)
         
@@ -2294,14 +2357,14 @@ def contact_form(request):
 
     try:
         send_html_email(
-            subject=f'[EventPro Contact] {subject}',
+            subject=f'[SpacioGrande Contact] {subject}',
             html_body=f'<p>From: {name} &lt;{email}&gt;</p><p>{message}</p>',
             recipient_list=['ralph.villarojo@gmail.com'],
             plain_text=f'From: {name} <{email}>\n\n{message}',
         )
         # Auto-reply to sender
         send_html_email(
-            subject='We received your message — EventPro',
+            subject='We received your message — SpacioGrande',
             html_body=(
                 f'<h1 style="color:#fff;font-size:22px;font-weight:900;margin:0 0 8px;">Message Received! ✉️</h1>'
                 f'<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 16px;">Hi <strong style="color:#e2e8f0;">{name}</strong>, thanks for reaching out! We\'ll get back to you within 24 hours.</p>'
@@ -2310,7 +2373,7 @@ def contact_form(request):
                 f'<p style="color:#e2e8f0;font-size:14px;margin:0;">{message}</p></div>'
             ),
             recipient_list=[email],
-            plain_text=f'Hi {name},\n\nThanks for reaching out! We received your message and will get back to you within 24 hours.\n\n— EventPro Team',
+            plain_text=f'Hi {name},\n\nThanks for reaching out! We received your message and will get back to you within 24 hours.\n\n— SpacioGrande Team',
         )
     except OSError as e:
         logger.warning('Contact form email failed: %s', e)
@@ -2363,7 +2426,7 @@ def reply_contact_message(request, message_id):
     contact.replied_at = timezone.now()
     contact.save()
     send_html_email(
-        subject=f'Re: {contact.subject} — EventPro',
+        subject=f'Re: {contact.subject} — SpacioGrande',
         html_body=(
             f'<h1 style="color:#fff;font-size:22px;font-weight:900;margin:0 0 8px;">We replied to your message 💬</h1>'
             f'<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 16px;">Hi <strong style="color:#e2e8f0;">{contact.name}</strong>, here is our response to your inquiry.</p>'
@@ -2372,7 +2435,7 @@ def reply_contact_message(request, message_id):
             f'<p style="color:#e2e8f0;font-size:14px;margin:0;line-height:1.6;">{reply_text}</p></div>'
         ),
         recipient_list=[contact.email],
-        plain_text=f'Hi {contact.name},\n\nOur reply:\n{reply_text}\n\n— EventPro Team',
+        plain_text=f'Hi {contact.name},\n\nOur reply:\n{reply_text}\n\n— SpacioGrande Team',
     )
     return Response({'message': 'Reply sent successfully'})
 
@@ -2469,10 +2532,10 @@ def test_email(request):
     test_to = request.GET.get('to', settings.EMAIL_HOST_USER)
     try:
         send_html_email(
-            subject='EventPro Email Test',
-            html_body='<p>If you receive this, the EventPro email bridge is working correctly.</p>',
+            subject='SpacioGrande Email Test',
+            html_body='<p>If you receive this, the SpacioGrande email bridge is working correctly.</p>',
             recipient_list=[test_to],
-            plain_text='If you receive this, the EventPro email bridge is working correctly.',
+            plain_text='If you receive this, the SpacioGrande email bridge is working correctly.',
             sync=True,
         )
         return Response({
@@ -2491,44 +2554,32 @@ def test_email(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def get_damages(request):
+def get_damage_catalog(request):
     if not request.user.is_organizer:
         return Response({'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
     try:
-        from .models import DamageReport
-        reports = DamageReport.objects.select_related('booking', 'booking__user', 'reported_by').all()
-        reports_data = []
-        for r in reports:
-            photo_url = None
-            if r.photo:
-                try:
-                    url = r.photo.url
-                    photo_url = url if url.startswith('http') else request.build_absolute_uri(url)
-                except Exception:
-                    photo_url = str(r.photo)
-            reports_data.append({
-                'id': r.id,
-                'booking_id': r.booking_id,
-                'booking_event_type': r.booking.event_type if r.booking else '',
-                'booking_date': str(r.booking.date) if r.booking and r.booking.date else '',
-                'client_name': _display_user_name(r.booking.user if r.booking else None, 'Unknown client'),
-                'item_type': r.item_type,
-                'item_name': r.item_name,
-                'quantity': r.quantity,
-                'estimated_cost': float(r.estimated_cost),
-                'recovered_amount': float(r.recovered_amount),
-                'net_loss': float(r.estimated_cost - r.recovered_amount),
-                'charge_to_client': r.charge_to_client,
-                'status': r.status,
-                'notes': r.notes,
-                'photo': photo_url,
-                'reported_by': _display_user_name(r.reported_by, None),
-                'created_at': r.created_at.isoformat(),
-                'updated_at': r.updated_at.isoformat(),
-            })
+        items = DamageCatalogItem.objects.filter(is_active=True).order_by('item_type', 'name')
+        return Response([_serialize_damage_catalog_item(item) for item in items])
+    except Exception as e:
+        logger.exception('get_damage_catalog error: %s', e)
+        return Response({'message': 'Failed to load damage catalog.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_damages(request):
+    try:
+        reports = DamageReport.objects.select_related('booking', 'booking__user', 'reported_by').prefetch_related('line_items')
+        if request.user.is_organizer:
+            reports = reports.all()
+            revenue_queryset = Booking.objects.filter(payment_status='paid')
+        else:
+            reports = reports.filter(booking__user=request.user)
+            revenue_queryset = Booking.objects.filter(user=request.user, payment_status='paid')
+        reports_data = [_serialize_damage_report(r, request) for r in reports]
         total_damage = sum(float(r.estimated_cost) for r in reports)
         total_recovered = sum(float(r.recovered_amount) for r in reports)
-        gross_revenue = float(Booking.objects.filter(payment_status='paid').aggregate(
+        gross_revenue = float(revenue_queryset.aggregate(
             total=__import__('django.db.models', fromlist=['Sum']).Sum('total_amount')
         )['total'] or 0)
         summary = {
@@ -2550,11 +2601,18 @@ def get_damages(request):
 def report_damage(request, booking_id):
     if not request.user.is_organizer:
         return Response({'message': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
-    from .models import DamageReport
     try:
         booking = Booking.objects.get(id=booking_id)
     except Booking.DoesNotExist:
         return Response({'message': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
+    raw_line_items = request.data.get('line_items')
+    parsed_items = []
+    if raw_line_items:
+        try:
+            parsed_items = json.loads(raw_line_items) if isinstance(raw_line_items, str) else raw_line_items
+        except json.JSONDecodeError:
+            return Response({'message': 'Invalid damage items payload.'}, status=status.HTTP_400_BAD_REQUEST)
+
     item_type = request.data.get('item_type', 'other')
     item_name = request.data.get('item_name', '').strip()
     quantity = int(request.data.get('quantity', 1))
@@ -2564,20 +2622,50 @@ def report_damage(request, booking_id):
     status_val = request.data.get('status', 'reported')
     notes = request.data.get('notes', '').strip()
     photo = request.FILES.get('photo')
-    report = DamageReport.objects.create(
-        booking=booking,
-        reported_by=request.user,
-        item_type=item_type,
-        item_name=item_name,
-        quantity=quantity,
-        estimated_cost=estimated_cost,
-        recovered_amount=recovered_amount,
-        charge_to_client=charge_to_client,
-        status=status_val,
-        notes=notes,
-        photo=photo,
+
+    with transaction.atomic():
+        report = DamageReport.objects.create(
+            booking=booking,
+            reported_by=request.user,
+            item_type=item_type,
+            item_name=item_name,
+            quantity=quantity,
+            estimated_cost=estimated_cost,
+            recovered_amount=recovered_amount,
+            charge_to_client=charge_to_client,
+            status=status_val,
+            notes=notes,
+            photo=photo,
+        )
+
+        for entry in parsed_items if isinstance(parsed_items, list) else []:
+            catalog_item = None
+            catalog_item_id = entry.get('catalog_item_id')
+            if catalog_item_id:
+                catalog_item = DamageCatalogItem.objects.filter(id=catalog_item_id).first()
+            DamageReportLineItem.objects.create(
+                report=report,
+                catalog_item=catalog_item,
+                item_type=entry.get('item_type') or (catalog_item.item_type if catalog_item else 'other'),
+                item_name=entry.get('item_name') or (catalog_item.name if catalog_item else item_name),
+                quantity=max(1, int(entry.get('quantity', 1))),
+                unit_price=Decimal(str(entry.get('unit_price', 0))),
+                total_price=Decimal(str(entry.get('total_price', 0))),
+            )
+
+    client_message = (
+        f'Damage report added to your {booking.event_type} booking on {booking.date}. '
+        f'Total estimated cost: P{float(report.estimated_cost):,.2f}.'
     )
-    return Response({'message': 'Damage report saved.', 'id': report.id}, status=status.HTTP_201_CREATED)
+    Notification.objects.create(user=booking.user, message=client_message)
+    send_ws_notification(booking.user.id, client_message, notif_type='damage_report')
+    if booking.user and booking.user.email:
+        try:
+            send_damage_report_email(booking.user.email, booking.user.first_name, booking, report)
+        except Exception:
+            logger.exception('Failed to send damage report email for booking %s', booking.id)
+
+    return Response({'message': 'Damage report saved.', 'id': report.id, 'report': _serialize_damage_report(report, request)}, status=status.HTTP_201_CREATED)
 
 
 @api_view(['DELETE'])

@@ -29,7 +29,9 @@ urlpatterns = [
     path('favicon.ico', lambda r: HttpResponse(status=204)),
     path('admin/', admin.site.urls),
     path('api/user/', include('user.urls')),
+    path('api/', include('user.urls')),
     path('api/user/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh_alias'),
     *_organizer_urls,
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 

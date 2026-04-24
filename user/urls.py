@@ -44,6 +44,7 @@ urlpatterns = [
     path('bookings/<int:booking_id>/upload-proof/', views.upload_payment_proof, name='upload_payment_proof'),
     path('bookings/<int:booking_id>/verify-payment/', views.verify_payment, name='verify_payment'),
     path('damages/', views.get_damages, name='get_damages'),
+    path('damages/catalog/', views.get_damage_catalog, name='get_damage_catalog'),
     path('bookings/<int:booking_id>/damages/report/', views.report_damage, name='report_damage'),
     path('reviews/', views.get_reviews, name='get_reviews'),
     path('reviews/submit/', views.submit_review, name='submit_review'),

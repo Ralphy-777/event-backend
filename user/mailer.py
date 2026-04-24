@@ -1,4 +1,4 @@
-"""Reliable email helpers for EventPro."""
+"""Reliable email helpers for SpacioGrande."""
 
 import logging
 import threading
@@ -7,6 +7,8 @@ import requests
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+BRAND_NAME = 'SpacioGrande'
+BRAND_FOOTER = f'{BRAND_NAME} Team'
 
 
 class EmailDeliveryError(RuntimeError):
@@ -154,12 +156,12 @@ def send_verification_email(email, first_name, code):
         + _p("If you didn't create an account, you can safely ignore this email.", '#64748b')
     )
     send_html_email(
-        subject='Your EventPro Verification Code',
+        subject=f'Your {BRAND_NAME} Verification Code',
         html_body=_wrap(body),
         recipient_list=[email],
         plain_text=(
             f'Hi {first_name},\n\nYour verification code is: {code}\n\n'
-            'Valid for 15 minutes.\n\nEventPro Team'
+            f'Valid for 15 minutes.\n\n{BRAND_FOOTER}'
         ),
         sync=True,
     )
@@ -177,10 +179,10 @@ def send_password_reset_email(email, first_name, code):
         + _p("If you didn't request this, you can safely ignore this email.", '#64748b')
     )
     send_html_email(
-        subject='Your EventPro Password Reset Code',
+        subject=f'Your {BRAND_NAME} Password Reset Code',
         html_body=_wrap(body),
         recipient_list=[email],
-        plain_text=f'Hi {first_name},\n\nYour password reset code is: {code}\n\nEventPro Team',
+        plain_text=f'Hi {first_name},\n\nYour password reset code is: {code}\n\n{BRAND_FOOTER}',
         sync=True,
     )
 
@@ -196,10 +198,10 @@ def send_email_change_verification(email, first_name, new_email, code):
         + _p("If you didn't request this, please ignore this email.", '#64748b')
     )
     send_html_email(
-        subject='Verify Your Email Change - EventPro',
+        subject=f'Verify Your Email Change - {BRAND_NAME}',
         html_body=body,
         recipient_list=[email],
-        plain_text=f'Hi {first_name},\n\nYour email change verification code is: {code}\n\nEventPro Team',
+        plain_text=f'Hi {first_name},\n\nYour email change verification code is: {code}\n\n{BRAND_FOOTER}',
         sync=True,
     )
 
@@ -234,12 +236,12 @@ def send_booking_confirmation_email(email, first_name, booking):
         )
     )
     send_html_email(
-        subject='Your EventPro Booking Request Received',
+        subject=f'Your {BRAND_NAME} Booking Request Received',
         html_body=body,
         recipient_list=[email],
         plain_text=(
             f'Hi {first_name},\n\nBooking received for {booking.event_type} on {event_date}.\n'
-            f'Amount: PHP {float(booking.total_amount):,.2f}\n\nEventPro Team'
+            f'Amount: PHP {float(booking.total_amount):,.2f}\n\n{BRAND_FOOTER}'
         ),
         sync=True,
         fail_silently=False,
@@ -265,8 +267,8 @@ def send_booking_status_email(email, first_name, booking, new_status, decline_re
             + _detail_table(rows)
             + _p('We look forward to making your event special.', '#94a3b8')
         )
-        subject = 'Your EventPro Booking is Confirmed'
-        plain = f'Hi {first_name},\n\nYour {booking.event_type} booking on {event_date} is confirmed.\n\nEventPro Team'
+        subject = f'Your {BRAND_NAME} Booking is Confirmed'
+        plain = f'Hi {first_name},\n\nYour {booking.event_type} booking on {event_date} is confirmed.\n\n{BRAND_FOOTER}'
     else:
         body = (
             _h1('Booking Update')
@@ -282,10 +284,10 @@ def send_booking_status_email(email, first_name, booking, new_status, decline_re
             )
             + _p('Please contact us or try booking a different date.', '#94a3b8')
         )
-        subject = 'Update on Your EventPro Booking'
+        subject = f'Update on Your {BRAND_NAME} Booking'
         plain = (
             f'Hi {first_name},\n\nYour {booking.event_type} booking on {event_date} was declined.\n'
-            f'Reason: {decline_reason or "N/A"}\n\nEventPro Team'
+            f'Reason: {decline_reason or "N/A"}\n\n{BRAND_FOOTER}'
         )
     send_html_email(
         subject=subject,
@@ -342,7 +344,7 @@ def send_guest_invitation_email(guest_email, host_name, booking, confirmed=False
         recipient_list=[guest_email],
         plain_text=(
             f'Hi,\n\n{host_name} invited you to their {booking.event_type} on {event_date} '
-            f'at {event_time} in {booking.location}.\n\nEventPro Team'
+            f'at {event_time} in {booking.location}.\n\n{BRAND_FOOTER}'
         ),
         sync=True,
         fail_silently=False,
@@ -362,10 +364,10 @@ def send_cancellation_email(email, first_name, event_type, date, cancel_reason='
         + _p('If this was a mistake, please create a new booking.', '#94a3b8')
     )
     send_html_email(
-        subject='Your EventPro Booking Has Been Cancelled',
+        subject=f'Your {BRAND_NAME} Booking Has Been Cancelled',
         html_body=body,
         recipient_list=[email],
-        plain_text=f'Hi {first_name},\n\nYour {event_type} booking on {date} has been cancelled.\n\nEventPro Team',
+        plain_text=f'Hi {first_name},\n\nYour {event_type} booking on {date} has been cancelled.\n\n{BRAND_FOOTER}',
         sync=True,
         fail_silently=False,
     )
@@ -385,12 +387,49 @@ def send_payment_confirmed_email(email, first_name, booking, reference):
         )
     )
     send_html_email(
-        subject='EventPro - GCash Payment Confirmed',
+        subject=f'{BRAND_NAME} - GCash Payment Confirmed',
         html_body=body,
         recipient_list=[email],
         plain_text=(
             f'Hi {first_name},\n\nPayment of PHP {float(booking.total_amount):,.2f} confirmed. '
-            f'Ref: {reference}\n\nEventPro Team'
+            f'Ref: {reference}\n\n{BRAND_FOOTER}'
+        ),
+        sync=True,
+        fail_silently=False,
+    )
+
+
+def send_damage_report_email(email, first_name, booking, report):
+    event_date = booking.date.strftime('%B %d, %Y') if hasattr(booking.date, 'strftime') else str(booking.date)
+    photo_note = 'The owner also attached a photo proof of the damage.' if getattr(report, 'photo', None) else 'No photo proof was attached.'
+    body = (
+        _h1('Damage Report Filed')
+        + _p(
+            f'Hi <strong style="color:#e2e8f0;">{_display_name(first_name)}</strong>, '
+            'the owner recorded a damage report for your booking.'
+        )
+        + _detail_table(
+            _detail_row('Event', booking.event_type)
+            + _detail_row('Date', event_date)
+            + _detail_row('Status', _badge(str(report.status).title(), '#ef4444'))
+            + _detail_row('Estimated Cost', f'PHP {float(report.estimated_cost):,.2f}')
+            + _detail_row('Recovered', f'PHP {float(report.recovered_amount):,.2f}')
+            + _detail_row('Charge To Client', 'Yes' if report.charge_to_client else 'No')
+        )
+        + _p('Open your booking details to review the damaged items list and the uploaded proof image.')
+        + _p(photo_note, '#94a3b8')
+    )
+    send_html_email(
+        subject=f'{BRAND_NAME} - Damage Report Added To Your Booking',
+        html_body=body,
+        recipient_list=[email],
+        plain_text=(
+            f'Hi {_display_name(first_name)},\n\n'
+            f'A damage report was added to your {booking.event_type} booking on {event_date}.\n'
+            f'Estimated cost: PHP {float(report.estimated_cost):,.2f}\n'
+            f'Charge to client: {"Yes" if report.charge_to_client else "No"}\n\n'
+            f'Please open your booking details to review the damaged items and uploaded proof image.\n\n'
+            f'{BRAND_FOOTER}'
         ),
         sync=True,
         fail_silently=False,
@@ -402,10 +441,10 @@ def _wrap(content):
         '<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;'
         'background:#1e293b;color:#e2e8f0;border-radius:12px;overflow:hidden;">'
         '<div style="background:linear-gradient(135deg,#0ea5e9,#6366f1);padding:30px;text-align:center;">'
-        '<h1 style="color:#fff;margin:0;font-size:24px;">EventPro</h1></div>'
+        f'<h1 style="color:#fff;margin:0;font-size:24px;">{BRAND_NAME}</h1></div>'
         f'<div style="padding:30px;">{content}</div>'
         '<div style="background:#0f172a;padding:20px;text-align:center;color:#64748b;font-size:12px;">'
-        '&copy; 2025 EventPro. All rights reserved.</div></div>'
+        f'&copy; 2025 {BRAND_NAME}. All rights reserved.</div></div>'
     )
 
 
