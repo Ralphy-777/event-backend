@@ -324,6 +324,24 @@ def _active_booking_queryset():
     return Booking.objects.exclude(status__in=['declined', 'cancelled'])
 
 
+def _booking_selected_halls(booking):
+    event_details = booking.event_details if isinstance(booking.event_details, dict) else {}
+    return _resolve_selected_halls(event_details.get('selected_halls'), booking.event_type)
+
+
+def _bookings_with_overlapping_halls(bookings, requested_halls):
+    requested_set = {hall.lower() for hall in _resolve_selected_halls(requested_halls) if hall}
+    if not requested_set:
+        return list(bookings)
+
+    overlapping = []
+    for booking in bookings:
+        booking_halls = {hall.lower() for hall in _booking_selected_halls(booking)}
+        if booking_halls & requested_set:
+            overlapping.append(booking)
+    return overlapping
+
+
 def _duplicate_booking_queryset(user, booking_date, time_slot, booking_time=None, exclude_booking_id=None):
     queryset = _active_booking_queryset().filter(user=user, date=booking_date, time_slot=time_slot)
     if time_slot != 'whole_day' and booking_time:
@@ -936,11 +954,13 @@ def check_availability(request):
     if requested_slot not in ['morning', 'afternoon', 'whole_day']:
         requested_slot = 'morning'
 
-    active = _active_booking_queryset().filter(date=date)
+    active = list(_active_booking_queryset().filter(date=date))
+    overlapping_active = _bookings_with_overlapping_halls(active, selected_halls)
+    date_blocked = len(overlapping_active) > 0
 
-    whole_day_count = active.filter(time_slot='whole_day').count()
-    morning_count = active.filter(time_slot='morning').count() + whole_day_count
-    afternoon_count = active.filter(time_slot='afternoon').count() + whole_day_count
+    whole_day_count = sum(1 for booking in overlapping_active if booking.time_slot == 'whole_day')
+    morning_count = sum(1 for booking in overlapping_active if booking.time_slot == 'morning') + whole_day_count
+    afternoon_count = sum(1 for booking in overlapping_active if booking.time_slot == 'afternoon') + whole_day_count
 
     conflict_summary = _conflict_summary(date, requested_slot)
     duplicate_info = None
@@ -965,22 +985,24 @@ def check_availability(request):
     return Response({
         'total_slots': MAX_SLOTS,
         'morning': {
-            'booked': morning_count,
-            'available': max(0, MAX_SLOTS - morning_count),
+            'booked': MAX_SLOTS if date_blocked else morning_count,
+            'available': 0 if date_blocked else max(0, MAX_SLOTS - morning_count),
         },
         'afternoon': {
-            'booked': afternoon_count,
-            'available': max(0, MAX_SLOTS - afternoon_count),
+            'booked': MAX_SLOTS if date_blocked else afternoon_count,
+            'available': 0 if date_blocked else max(0, MAX_SLOTS - afternoon_count),
         },
         # legacy field kept for backward compat
-        'available_rooms': max(0, MAX_SLOTS - active.count()),
-        'booked_rooms': active.count(),
+        'available_rooms': 0 if date_blocked else MAX_SLOTS,
+        'booked_rooms': len(overlapping_active),
         'warnings': conflict_summary['warnings'],
         'conflicts': {
             'requested_slot': requested_slot,
             'whole_day_booked': whole_day_count,
             'morning_nearly_full': morning_count >= 4,
             'afternoon_nearly_full': afternoon_count >= 4,
+            'date_blocked': date_blocked,
+            'requested_halls': selected_halls,
         },
         'pricing': pricing_payload,
         'combo_suggestions': _build_combo_suggestions(event_type_name, guest_count),
@@ -990,11 +1012,18 @@ def check_availability(request):
 @api_view(['GET'])
 def get_public_events(request):
     event_type = request.GET.get('type', None)
-    
-    if event_type:
-        bookings = Booking.objects.filter(event_type=event_type, status='confirmed')
+    requested_status = (request.GET.get('status') or 'confirmed').strip().lower()
+
+    if requested_status == 'active':
+        statuses = ['pending', 'confirmed']
+    elif requested_status == 'pending':
+        statuses = ['pending']
     else:
-        bookings = Booking.objects.filter(status='confirmed')
+        statuses = ['confirmed']
+
+    bookings = Booking.objects.filter(status__in=statuses)
+    if event_type:
+        bookings = bookings.filter(event_type=event_type)
     
     data = [{
         'id': b.id,
@@ -1159,6 +1188,8 @@ def create_booking(request):
             )
 
         invited_emails = ', '.join(normalized_emails)
+        if isinstance(event_details, dict):
+            event_details['selected_halls'] = selected_halls
 
         # Validate invited emails count against event type max
         if invited_emails:
@@ -1203,20 +1234,29 @@ def create_booking(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        active = _active_booking_queryset().filter(date=date)
-        whole_day_booked = active.filter(time_slot='whole_day').count()
+        active = list(_active_booking_queryset().filter(date=date))
+        overlapping_active = _bookings_with_overlapping_halls(active, selected_halls)
+        if overlapping_active:
+            return Response(
+                {
+                    'message': 'This hall is no longer available on that date because there is already an active booking for the same hall, even if it is still pending.',
+                    'conflicts': _conflict_summary(date, time_slot, data.get('time') if time_slot != 'whole_day' else None),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        whole_day_booked = sum(1 for booking in overlapping_active if booking.time_slot == 'whole_day')
 
         if time_slot == 'whole_day':
-            morning_used = active.filter(time_slot='morning').count() + whole_day_booked
-            afternoon_used = active.filter(time_slot='afternoon').count() + whole_day_booked
+            morning_used = sum(1 for booking in overlapping_active if booking.time_slot == 'morning') + whole_day_booked
+            afternoon_used = sum(1 for booking in overlapping_active if booking.time_slot == 'afternoon') + whole_day_booked
             if morning_used >= MAX_SLOTS or afternoon_used >= MAX_SLOTS:
                 return Response({'message': 'This date is fully booked for whole day'}, status=status.HTTP_400_BAD_REQUEST)
         elif time_slot == 'morning':
-            morning_used = active.filter(time_slot='morning').count() + whole_day_booked
+            morning_used = sum(1 for booking in overlapping_active if booking.time_slot == 'morning') + whole_day_booked
             if morning_used >= MAX_SLOTS:
                 return Response({'message': 'Morning slots are fully booked for this date'}, status=status.HTTP_400_BAD_REQUEST)
         elif time_slot == 'afternoon':
-            afternoon_used = active.filter(time_slot='afternoon').count() + whole_day_booked
+            afternoon_used = sum(1 for booking in overlapping_active if booking.time_slot == 'afternoon') + whole_day_booked
             if afternoon_used >= MAX_SLOTS:
                 return Response({'message': 'Afternoon slots are fully booked for this date'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1525,9 +1565,10 @@ def update_booking(request, booking_id):
         
         # Check availability for new date if date is changed
         if new_date and new_date != str(booking.date):
-            existing_bookings = _active_booking_queryset().filter(date=new_date).exclude(id=booking_id).count()
-            if existing_bookings >= 5:
-                return Response({'message': 'New date is fully booked'}, status=status.HTTP_400_BAD_REQUEST)
+            existing_bookings = list(_active_booking_queryset().filter(date=new_date).exclude(id=booking_id))
+            overlapping_bookings = _bookings_with_overlapping_halls(existing_bookings, _booking_selected_halls(booking))
+            if overlapping_bookings:
+                return Response({'message': 'New date is already booked for the same hall'}, status=status.HTTP_400_BAD_REQUEST)
             booking.date = new_date
 
         duplicate_booking = _duplicate_booking_queryset(
