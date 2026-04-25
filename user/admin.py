@@ -138,6 +138,10 @@ class BookingAdmin(admin.ModelAdmin):
         return ', '.join(parts) if parts else 'No add-ons selected.'
     addons_summary.short_description = 'Selected add-ons'
 
+    def save_model(self, request, obj, form, change):
+        obj.total_amount = obj.calculate_amount()
+        super().save_model(request, obj, form, change)
+
     def approve_bookings(self, request, queryset):
         updated = queryset.filter(status='pending').update(status='confirmed', accepted_at=timezone.now())
         self.message_user(request, f'{updated} booking(s) confirmed.')

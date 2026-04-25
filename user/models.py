@@ -139,6 +139,10 @@ class Booking(models.Model):
             return round((base * 2 * Decimal('0.8')) + excess_total + add_on_total, 2)
         return round(base + excess_total + add_on_total, 2)
 
+    def save(self, *args, **kwargs):
+        self.total_amount = self.calculate_amount()
+        super().save(*args, **kwargs)
+
 
 class BookingStatusHistory(models.Model):
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='status_history')
