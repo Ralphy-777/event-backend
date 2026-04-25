@@ -87,7 +87,7 @@ class BookingAdmin(admin.ModelAdmin):
     list_filter   = ['status', 'payment_status', 'event_type', 'time_slot', 'date']
     search_fields = ['user__email', 'user__first_name', 'user__last_name', 'event_type']
     ordering      = ['-created_at']
-    readonly_fields = ['created_at', 'total_amount', 'payment_deadline', 'accepted_at']
+    readonly_fields = ['created_at', 'total_amount', 'payment_deadline', 'accepted_at', 'addons_summary']
     date_hierarchy = 'date'
     list_per_page = 25
     actions = ['approve_bookings', 'decline_bookings']
@@ -106,7 +106,7 @@ class BookingAdmin(admin.ModelAdmin):
             'fields': ('payment_status', 'payment_method', 'total_amount', 'payment_deadline', 'gcash_reference', 'payment_proof')
         }),
         ('Extra', {
-            'fields': ('event_details', 'reminder_sent', 'created_at'),
+            'fields': ('addons_summary', 'event_details', 'reminder_sent', 'created_at'),
             'classes': ('collapse',),
         }),
     )
@@ -122,6 +122,21 @@ class BookingAdmin(admin.ModelAdmin):
     def payment_badge(self, obj):
         return _badge(obj.payment_status.replace('_', ' ').title(), STATUS_COLORS.get(obj.payment_status, '#64748b'))
     payment_badge.short_description = 'Payment'
+
+    def addons_summary(self, obj):
+        event_details = obj.event_details if isinstance(obj.event_details, dict) else {}
+        parts = []
+        regular_tables = event_details.get('regular_tables')
+        presidential_tables = event_details.get('presidential_tables')
+        if str(regular_tables or '').strip() not in ['', '0']:
+            parts.append(f'Regular Table x{regular_tables}')
+        if str(presidential_tables or '').strip() not in ['', '0']:
+            parts.append(f'Presidential Table x{presidential_tables}')
+        add_on_total = event_details.get('add_on_total')
+        if str(add_on_total or '').strip() not in ['', '0', '0.0', '0.00']:
+            parts.append(f'Total P{add_on_total}')
+        return ', '.join(parts) if parts else 'No add-ons selected.'
+    addons_summary.short_description = 'Selected add-ons'
 
     def approve_bookings(self, request, queryset):
         updated = queryset.filter(status='pending').update(status='confirmed', accepted_at=timezone.now())

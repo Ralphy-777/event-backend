@@ -130,9 +130,14 @@ class Booking(models.Model):
             base = Decimal('5000')
         excess_guests = max(0, int(self.capacity or 0) - HALL_INCLUDED_CAPACITY)
         excess_total = Decimal(excess_guests) * HALL_EXCESS_PERSON_FEE
+        event_details = self.event_details if isinstance(self.event_details, dict) else {}
+        try:
+            add_on_total = Decimal(str(event_details.get('add_on_total', 0) or 0))
+        except Exception:
+            add_on_total = Decimal('0')
         if self.time_slot == 'whole_day' or self.whole_day:
-            return round((base * 2 * Decimal('0.8')) + excess_total, 2)
-        return round(base + excess_total, 2)
+            return round((base * 2 * Decimal('0.8')) + excess_total + add_on_total, 2)
+        return round(base + excess_total + add_on_total, 2)
 
 
 class BookingStatusHistory(models.Model):

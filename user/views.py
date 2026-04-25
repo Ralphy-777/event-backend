@@ -147,6 +147,16 @@ def _get_guest_count(value):
         return 0
 
 
+def _get_add_on_total(event_details):
+    if not isinstance(event_details, dict):
+        return Decimal('0')
+    try:
+        add_on_total = Decimal(str(event_details.get('add_on_total', 0) or 0))
+    except Exception:
+        add_on_total = Decimal('0')
+    return max(add_on_total, Decimal('0'))
+
+
 def _get_pricing_payload(event_type_obj, guest_count):
     base_price = _get_hall_base_price(event_type_obj)
     excess_guests = max(0, guest_count - HALL_INCLUDED_CAPACITY)
@@ -634,6 +644,8 @@ def get_event_types(request):
                 'max_capacity': HALL_SINGLE_HALL_LIMIT,
                 'max_invited_emails': et.max_invited_emails,
                 'people_per_table': et.people_per_table,
+                'regular_table_price': float(et.regular_table_price),
+                'presidential_table_price': float(et.presidential_table_price),
                 'excess_person_fee': float(HALL_EXCESS_PERSON_FEE),
                 'description': et.description,
                 'image': image,
@@ -1053,7 +1065,7 @@ def get_booking_reason_templates(request):
 @permission_classes([IsAuthenticated])
 def get_bookings(request):
     try:
-        bookings = Booking.objects.all().select_related('user').prefetch_related('status_history')
+        bookings = Booking.objects.all().select_related('user').prefetch_related('status_history', 'damage_reports')
         data = []
         for b in bookings:
             proof_url = None
@@ -1066,7 +1078,10 @@ def get_bookings(request):
             data.append({
                 'id': b.id,
                 'user': _display_user_name(b.user),
+                'client_email': b.user.email,
+                'client_address': b.user.address,
                 'event_type': b.event_type,
+                'description': b.description,
                 'capacity': b.capacity,
                 'date': b.date,
                 'time': b.time,
@@ -1077,6 +1092,12 @@ def get_bookings(request):
                 'payment_method': b.payment_method,
                 'total_amount': float(b.total_amount),
                 'reference_number': _payment_reference_for_booking(b),
+                'event_details': b.event_details,
+                'invited_emails': b.invited_emails,
+                'special_requests': b.special_requests,
+                'whole_day': b.whole_day,
+                'damage_count': b.damage_reports.count(),
+                'damage_total_cost': sum(float(report.estimated_cost or 0) for report in b.damage_reports.all()),
                 'decline_reason': b.decline_reason or '',
                 'cancel_reason': b.cancel_reason or '',
                 'status_history': _booking_status_history(b),
@@ -1312,7 +1333,8 @@ def create_booking(request):
         )
 
         # Calculate total amount
-        booking.total_amount = Decimal(str((combo_pricing or _get_pricing_payload(event_type_obj, guest_count))['total_amount']))
+        base_total_amount = Decimal(str((combo_pricing or _get_pricing_payload(event_type_obj, guest_count))['total_amount']))
+        booking.total_amount = base_total_amount + _get_add_on_total(booking.event_details)
         booking.save()
         booking.refresh_from_db()  # ensure date/time are proper Python objects
         _record_booking_history(
@@ -2653,6 +2675,8 @@ def report_damage(request, booking_id):
             parsed_items = json.loads(raw_line_items) if isinstance(raw_line_items, str) else raw_line_items
         except json.JSONDecodeError:
             return Response({'message': 'Invalid damage items payload.'}, status=status.HTTP_400_BAD_REQUEST)
+    if parsed_items and not isinstance(parsed_items, list):
+        return Response({'message': 'Invalid damage items payload.'}, status=status.HTTP_400_BAD_REQUEST)
 
     item_type = request.data.get('item_type', 'other')
     item_name = request.data.get('item_name', '').strip()
@@ -2663,6 +2687,38 @@ def report_damage(request, booking_id):
     status_val = request.data.get('status', 'reported')
     notes = request.data.get('notes', '').strip()
     photo = request.FILES.get('photo')
+
+    selected_catalog_item_ids = set()
+    already_reported_catalog_item_ids = set(
+        DamageReportLineItem.objects.filter(report__booking=booking, catalog_item_id__isnull=False)
+        .values_list('catalog_item_id', flat=True)
+    )
+
+    normalized_line_items = []
+    for entry in parsed_items if isinstance(parsed_items, list) else []:
+        catalog_item = None
+        catalog_item_id = entry.get('catalog_item_id')
+        if catalog_item_id:
+            catalog_item = DamageCatalogItem.objects.filter(id=catalog_item_id).first()
+            if not catalog_item:
+                return Response({'message': 'One of the selected damage items no longer exists.'}, status=status.HTTP_400_BAD_REQUEST)
+            if catalog_item.id in selected_catalog_item_ids:
+                return Response({'message': f'{catalog_item.name} is already selected in this report.'}, status=status.HTTP_400_BAD_REQUEST)
+            if catalog_item.id in already_reported_catalog_item_ids:
+                return Response({'message': f'{catalog_item.name} was already reported for this booking.'}, status=status.HTTP_400_BAD_REQUEST)
+            selected_catalog_item_ids.add(catalog_item.id)
+
+        quantity_value = max(1, int(entry.get('quantity', 1)))
+        unit_price_value = Decimal(str(entry.get('unit_price', 0)))
+        total_price_value = Decimal(str(entry.get('total_price', quantity_value * float(unit_price_value))))
+        normalized_line_items.append({
+            'catalog_item': catalog_item,
+            'item_type': entry.get('item_type') or (catalog_item.item_type if catalog_item else 'other'),
+            'item_name': entry.get('item_name') or (catalog_item.name if catalog_item else item_name),
+            'quantity': quantity_value,
+            'unit_price': unit_price_value,
+            'total_price': total_price_value,
+        })
 
     with transaction.atomic():
         report = DamageReport.objects.create(
@@ -2679,19 +2735,15 @@ def report_damage(request, booking_id):
             photo=photo,
         )
 
-        for entry in parsed_items if isinstance(parsed_items, list) else []:
-            catalog_item = None
-            catalog_item_id = entry.get('catalog_item_id')
-            if catalog_item_id:
-                catalog_item = DamageCatalogItem.objects.filter(id=catalog_item_id).first()
+        for entry in normalized_line_items:
             DamageReportLineItem.objects.create(
                 report=report,
-                catalog_item=catalog_item,
-                item_type=entry.get('item_type') or (catalog_item.item_type if catalog_item else 'other'),
-                item_name=entry.get('item_name') or (catalog_item.name if catalog_item else item_name),
-                quantity=max(1, int(entry.get('quantity', 1))),
-                unit_price=Decimal(str(entry.get('unit_price', 0))),
-                total_price=Decimal(str(entry.get('total_price', 0))),
+                catalog_item=entry['catalog_item'],
+                item_type=entry['item_type'],
+                item_name=entry['item_name'],
+                quantity=entry['quantity'],
+                unit_price=entry['unit_price'],
+                total_price=entry['total_price'],
             )
 
     client_message = (
